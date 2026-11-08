@@ -9,6 +9,7 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useState } from "react";
 import { useStore, type ChatAttachment } from "../../lib/store";
+import { apiFetch } from "../../lib/session";
 
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024; // 8 MB inline cap
 
@@ -111,7 +112,7 @@ async function handleFile(f: File, add: (a: ChatAttachment) => void) {
   const form = new FormData();
   form.append("file", f);
   try {
-    const resp = await fetch("/api/upload", { method: "POST", body: form });
+    const resp = await apiFetch("/api/upload", { method: "POST", body: form });
     const data = await resp.json();
     if (data?.url) {
       add({

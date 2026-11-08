@@ -111,10 +111,14 @@ class TestPrecisionGestures:
         assert ev == "right_click"
 
     def test_fist_pause_and_palm_freeze(self):
-        c = PrecisionClassifier(fist_pause_ms=50, open_palm_freeze_ms=50)
+        c = PrecisionClassifier(
+            fist_pause_ms=50, open_palm_freeze_ms=50, pinch_threshold=0.04,
+        )
         assert c.update(_fist_hand(), 1000)[0] == "none"
         assert c.update(_fist_hand(), 1060)[0] == "pause"
-        c2 = PrecisionClassifier(open_palm_freeze_ms=50, fist_pause_ms=9999)
+        c2 = PrecisionClassifier(
+            open_palm_freeze_ms=50, fist_pause_ms=9999, pinch_threshold=0.04,
+        )
         assert c2.update(_open_hand(), 1000)[0] == "none"
         assert c2.update(_open_hand(), 1060)[0] == "freeze_toggle"
 

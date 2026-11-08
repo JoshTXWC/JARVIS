@@ -151,7 +151,7 @@ model:
   #   Gemini 2.5 Flash/Pro  → GEMINI_API_KEY → Google OpenAI-compatible route
   provider: openai_compatible
   endpoint: https://generativelanguage.googleapis.com/v1beta/openai
-  model: gemini-pro-latest
+  model: gemini-3.1-flash-lite
   api_key_env: GEMINI_API_KEY
   # Restored when leaving a cloud model via the switcher.
   local_endpoint: http://localhost:11434/v1
@@ -169,10 +169,10 @@ image_model:
 
 permissions:
   # safe    = SAFE auto, CAUTION ask, DANGEROUS refuse unless explicit
-  # confirm = SAFE auto, CAUTION ask, DANGEROUS ask with hard warning
+  # confirm = SAFE auto, CAUTION ask, DANGEROUS ask with hard warning (DEFAULT)
   # auto    = SAFE auto, CAUTION auto, DANGEROUS ask
-  # bypass  = ALL auto-allowed (denylist remains as last guardrail)
-  mode: bypass
+  # bypass  = CAUTION+SAFE auto; DANGEROUS still asks; hard denials never bypassed
+  mode: confirm
   # Patterns matched against the full command/string. Case-insensitive.
   denylist:
     - "rm -rf /"

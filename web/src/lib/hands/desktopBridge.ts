@@ -18,11 +18,17 @@ declare global {
 let lastOverlayMs = 0;
 const OVERLAY_MIN_MS = 16;
 
-export function publishHandsFrame(frame: HandsFrame, opts?: { overlay?: boolean }) {
-  // Backend injection (Precision / Spatial). HUD mode ignores inject server-side.
-  wsClient.send({ type: "hands_frame", ...frame });
+export function publishHandsFrame(
+  frame: HandsFrame,
+  opts?: { overlay?: boolean; inject?: boolean },
+) {
+  // Backend injection (Precision / Spatial). Server no-ops when disabled / HUD.
+  if (opts?.inject !== false) {
+    wsClient.send({ type: "hands_frame", ...frame });
+  }
 
   // Desktop skeleton overlay via Electron IPC (throttled ~60 Hz).
+  // Always push when Hands is running so the chip leaves "idle".
   if (opts?.overlay !== false && window.jarvis?.send) {
     const now = frame.t || performance.now();
     if (now - lastOverlayMs >= OVERLAY_MIN_MS) {
@@ -41,6 +47,15 @@ export function sendDesktopControlAction(
   payload: Record<string, unknown> = {},
 ) {
   wsClient.send({ type: "desktop_control", action, ...payload });
+}
+
+/** Direct OS mouse injection via Electron → Python Win32 worker (low latency). */
+export function sendDesktopInput(op: Record<string, unknown>) {
+  window.jarvis?.send?.("jarvis:desktop-input", op);
+}
+
+export function setDesktopInjectArmed(armed: boolean) {
+  window.jarvis?.send?.("jarvis:desktop-inject-arm", { armed: !!armed });
 }
 
 /** Compact landmarks for the wire (drop unused z precision). */

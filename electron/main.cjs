@@ -10,11 +10,18 @@
  * detection in the renderer ALSO opens the window (via IPC) so the user
  * can speak from anywhere.
  */
-const { app, BrowserWindow, Menu, Tray, globalShortcut, ipcMain, nativeImage, screen, session, shell } = require("electron");
+const { app, BrowserWindow, Menu, Tray, globalShortcut, ipcMain, nativeImage, screen, session, shell, powerSaveBlocker } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const { spawn } = require("child_process");
 const http = require("http");
+
+// Keep MediaPipe / RAF alive when JARVIS is occluded, minimized, or in the tray.
+// Without these, Chromium throttles the HUD to ~1fps and the desktop overlay
+// reports "no signal" as soon as another app is focused.
+app.commandLine.appendSwitch("disable-renderer-backgrounding");
+app.commandLine.appendSwitch("disable-background-timer-throttling");
+app.commandLine.appendSwitch("disable-backgrounding-occluded-windows");
 
 const BACKEND_PORT = process.env.JARVIS_PORT ? parseInt(process.env.JARVIS_PORT, 10) : 7341;
 const BACKEND_URL  = `http://127.0.0.1:${BACKEND_PORT}`;
@@ -31,6 +38,10 @@ let backend = null;
 let tray = null;
 let isQuiting = false;
 let overlayWanted = false;
+let handsPowerBlockerId = null;
+let injectProc = null;
+let injectArmed = false;
+let injectBuf = "";
 
 // ── backend lifecycle ─────────────────────────────────────────────────────
 
@@ -188,17 +199,27 @@ function installPermissionHandlers() {
   });
 
   // CSP for the loaded app page (loopback backend serves the HUD).
+  // Skip the desktop hands overlay — it is a transparent local viz surface.
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    const url = details.url || "";
+    if (url.includes("desktop-overlay")) {
+      callback({ responseHeaders: details.responseHeaders });
+      return;
+    }
     const headers = { ...details.responseHeaders };
+    // MediaPipe Hands loads vision WASM + JS from jsDelivr; without these
+    // connect/script allowances the camera boots but landmarks never arrive
+    // and the desktop overlay stays stuck on "idle".
     const csp = [
       "default-src 'self'",
-      "script-src 'self'",
+      "script-src 'self' 'wasm-unsafe-eval' https://cdn.jsdelivr.net",
       "style-src 'self' 'unsafe-inline'",
       "img-src 'self' data: blob: https:",
       "media-src 'self' blob: mediastream:",
       "font-src 'self' data:",
-      `connect-src 'self' ws://127.0.0.1:${BACKEND_PORT} ws://localhost:${BACKEND_PORT} http://127.0.0.1:${BACKEND_PORT} http://localhost:${BACKEND_PORT}`,
-      "worker-src 'self' blob:",
+      `connect-src 'self' blob: data: ws://127.0.0.1:${BACKEND_PORT} ws://localhost:${BACKEND_PORT} http://127.0.0.1:${BACKEND_PORT} http://localhost:${BACKEND_PORT} https://cdn.jsdelivr.net`,
+      "worker-src 'self' blob: https://cdn.jsdelivr.net",
+      "child-src 'self' blob:",
       "frame-ancestors 'none'",
       "object-src 'none'",
       "base-uri 'self'",
@@ -281,9 +302,14 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      backgroundThrottling: false,
       preload: path.join(__dirname, "preload.cjs"),
     },
   });
+
+  try {
+    mainWindow.webContents.setBackgroundThrottling(false);
+  } catch { /* older Electron */ }
 
   mainWindow.once("ready-to-show", () => {
     mainWindow.show();
@@ -371,11 +397,21 @@ function virtualDisplayBounds() {
   return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
 }
 
+function overlayHtmlCandidates() {
+  return [
+    path.join(PROJECT_ROOT, "web", "dist", "desktop-overlay.html"),
+    path.join(PROJECT_ROOT, "web", "public", "desktop-overlay.html"),
+  ];
+}
+
 function createOverlayWindow() {
   if (overlayWindow && !overlayWindow.isDestroyed()) return overlayWindow;
   const bounds = virtualDisplayBounds();
   overlayWindow = new BrowserWindow({
-    ...bounds,
+    x: bounds.x,
+    y: bounds.y,
+    width: Math.max(100, bounds.width),
+    height: Math.max(100, bounds.height),
     frame: false,
     transparent: true,
     backgroundColor: "#00000000",
@@ -385,26 +421,61 @@ function createOverlayWindow() {
     minimizable: false,
     fullscreenable: false,
     skipTaskbar: true,
-    focusable: false,
+    // focusable:true — Windows often fails to paint transparent always-on-top
+    // windows that are created focusable:false.
+    focusable: true,
     hasShadow: false,
     show: false,
     alwaysOnTop: true,
+    fullscreen: false,
+    simpleFullscreen: false,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
       preload: path.join(__dirname, "overlay-preload.cjs"),
+      backgroundThrottling: false,
     },
   });
-  // Click-through everywhere except CSS pointer-events:auto regions (control chip).
-  overlayWindow.setIgnoreMouseEvents(true, { forward: true });
-  try {
-    overlayWindow.setAlwaysOnTop(true, "screen-saver");
-  } catch {
-    overlayWindow.setAlwaysOnTop(true);
+
+  const applyTopmost = () => {
+    try {
+      overlayWindow.setAlwaysOnTop(true, "screen-saver", 1);
+    } catch {
+      try { overlayWindow.setAlwaysOnTop(true, "screen-saver"); }
+      catch { overlayWindow.setAlwaysOnTop(true); }
+    }
+    try {
+      overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+    } catch { /* noop */ }
+    // Click-through except CSS pointer-events:auto (control chip).
+    try {
+      overlayWindow.setIgnoreMouseEvents(true, { forward: true });
+    } catch {
+      overlayWindow.setIgnoreMouseEvents(true);
+    }
+  };
+  applyTopmost();
+
+  overlayWindow.once("ready-to-show", () => {
+    if (!overlayWanted || !overlayWindow || overlayWindow.isDestroyed()) return;
+    try { overlayWindow.setBounds(virtualDisplayBounds()); } catch { /* noop */ }
+    applyTopmost();
+    overlayWindow.showInactive();
+    console.log("[electron] desktop hands overlay ready", overlayWindow.getBounds());
+  });
+
+  overlayWindow.webContents.on("did-fail-load", (_e, code, desc, url) => {
+    console.error("[electron] overlay failed to load", code, desc, url);
+  });
+
+  // Prefer local file (works even if backend SPA routing hiccups), else HTTP.
+  const local = overlayHtmlCandidates().find((p) => fs.existsSync(p));
+  if (local) {
+    overlayWindow.loadFile(local);
+  } else {
+    overlayWindow.loadURL(`${BACKEND_URL}/desktop-overlay.html`);
   }
-  overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-  overlayWindow.loadURL(`${BACKEND_URL}/desktop-overlay.html`);
   overlayWindow.on("closed", () => { overlayWindow = null; });
   return overlayWindow;
 }
@@ -412,9 +483,17 @@ function createOverlayWindow() {
 function openDesktopOverlay() {
   overlayWanted = true;
   const win = createOverlayWindow();
-  if (!win.isVisible()) win.showInactive();
-  // Re-fit if display layout changed.
   try { win.setBounds(virtualDisplayBounds()); } catch { /* noop */ }
+  if (!win.isVisible()) {
+    // Show now; ready-to-show also shows after first load.
+    win.showInactive();
+  }
+  try {
+    win.setAlwaysOnTop(true, "screen-saver", 1);
+  } catch {
+    win.setAlwaysOnTop(true);
+  }
+  console.log("[electron] desktop hands overlay open requested");
 }
 
 function closeDesktopOverlay() {
@@ -422,6 +501,77 @@ function closeDesktopOverlay() {
   if (overlayWindow && !overlayWindow.isDestroyed()) {
     overlayWindow.hide();
   }
+}
+
+function venvPython() {
+  return process.platform === "win32"
+    ? path.join(PROJECT_ROOT, "venv", "Scripts", "python.exe")
+    : path.join(PROJECT_ROOT, "venv", "bin", "python");
+}
+
+function ensureInjectWorker() {
+  if (injectProc && injectProc.exitCode == null) return injectProc;
+  const py = venvPython();
+  if (!fs.existsSync(py)) {
+    console.error("[electron] inject worker: venv python missing", py);
+    return null;
+  }
+  injectProc = spawn(py, ["-m", "jarvis.integrations.desktop_control.inject_worker"], {
+    cwd: PROJECT_ROOT,
+    env: { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1" },
+    stdio: ["pipe", "pipe", "pipe"],
+    windowsHide: true,
+    // CREATE_NO_WINDOW — keep a console from flashing on each restart.
+    ...(process.platform === "win32" ? { creationFlags: 0x08000000 } : {}),
+  });
+  injectBuf = "";
+  injectProc.stdout.on("data", (chunk) => {
+    injectBuf += chunk.toString("utf8");
+    let idx;
+    while ((idx = injectBuf.indexOf("\n")) >= 0) {
+      const line = injectBuf.slice(0, idx).trim();
+      injectBuf = injectBuf.slice(idx + 1);
+      if (line) console.log("[inject]", line);
+    }
+  });
+  injectProc.stderr.on("data", (chunk) => {
+    console.warn("[inject:err]", chunk.toString("utf8"));
+  });
+  injectProc.on("exit", (code) => {
+    console.log("[electron] inject worker exited", code);
+    injectProc = null;
+  });
+  console.log("[electron] inject worker started pid=", injectProc.pid);
+  return injectProc;
+}
+
+function stopInjectWorker() {
+  injectArmed = false;
+  if (!injectProc) return;
+  try {
+    injectProc.stdin.write(JSON.stringify({ op: "release" }) + "\n");
+    injectProc.stdin.write(JSON.stringify({ op: "cursor_show" }) + "\n");
+  } catch { /* noop */ }
+  try {
+    injectProc.kill();
+  } catch { /* noop */ }
+  injectProc = null;
+}
+
+function writeInjectRaw(op) {
+  if (!op || !op.op) return;
+  const proc = ensureInjectWorker();
+  if (!proc || !proc.stdin || !proc.stdin.writable) return;
+  try {
+    proc.stdin.write(JSON.stringify(op) + "\n");
+  } catch (e) {
+    console.warn("[electron] inject write failed", e);
+  }
+}
+
+function sendInjectOp(op) {
+  if (!injectArmed) return;
+  writeInjectRaw(op);
 }
 
 function installIpc() {
@@ -435,6 +585,40 @@ function installIpc() {
 
   ipcMain.on("jarvis:desktop-overlay-open", () => openDesktopOverlay());
   ipcMain.on("jarvis:desktop-overlay-close", () => closeDesktopOverlay());
+  ipcMain.handle("jarvis:virtual-screen", () => virtualDisplayBounds());
+  ipcMain.on("jarvis:desktop-inject-arm", (_e, payload) => {
+    const armed = !!(payload && payload.armed);
+    injectArmed = armed;
+    if (armed) {
+      ensureInjectWorker();
+      writeInjectRaw({ op: "cursor_hide" });
+      console.log("[electron] desktop inject ARMED");
+    } else {
+      writeInjectRaw({ op: "release" });
+      writeInjectRaw({ op: "win_drop" });
+      writeInjectRaw({ op: "cursor_show" });
+      console.log("[electron] desktop inject disarmed");
+    }
+  });
+  ipcMain.on("jarvis:desktop-input", (_e, op) => {
+    sendInjectOp(op);
+  });
+  ipcMain.on("jarvis:hands-active", (_e, active) => {
+    // Prevent OS/app suspension while the webcam tracker must keep running.
+    try {
+      if (active && handsPowerBlockerId == null) {
+        handsPowerBlockerId = powerSaveBlocker.start("prevent-app-suspension");
+      } else if (!active && handsPowerBlockerId != null) {
+        powerSaveBlocker.stop(handsPowerBlockerId);
+        handsPowerBlockerId = null;
+      }
+    } catch (e) {
+      console.warn("[electron] powerSaveBlocker", e);
+    }
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      try { mainWindow.webContents.setBackgroundThrottling(false); } catch { /* noop */ }
+    }
+  });
   ipcMain.on("jarvis:hands-overlay-frame", (_e, frame) => {
     if (!overlayWanted) return;
     if (overlayWindow && !overlayWindow.isDestroyed()) {
@@ -544,6 +728,7 @@ app.on("will-quit", () => {
 app.on("before-quit", () => {
   isQuiting = true;
   persistCurrentBounds();
+  stopInjectWorker();
   closeDesktopOverlay();
   if (overlayWindow && !overlayWindow.isDestroyed()) {
     try { overlayWindow.destroy(); } catch { /* ignore */ }

@@ -192,18 +192,31 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                 })
 
             elif mtype == "hands_frame":
-                # High-rate landmark stream from the shared MediaPipe pipeline.
+                # High-rate landmark stream — must stay sync/low-latency.
+                # to_thread here backlogged the receive loop and broke pinch/drag.
                 try:
                     from ..integrations.desktop_control import get_desktop_control
                     dc = getattr(state, "desktop_control", None) or get_desktop_control(
                         cfg.abs_path("data")
                     )
                     state.desktop_control = dc
-                    result = await asyncio.to_thread(dc.ingest_frame, msg)
-                    # Throttle ACKs — only reply on meaningful gesture / action.
+                    result = dc.ingest_frame(msg)
                     st = (result or {}).get("status") or {}
-                    if (result or {}).get("jarvis_action") or st.get("gesture") not in {
-                        None, "none", "drag_move",
+                    gesture = st.get("gesture")
+                    if (result or {}).get("jarvis_action") or gesture in {
+                        "click",
+                        "drag_start",
+                        "drag_end",
+                        "right_click",
+                        "pause",
+                        "freeze_toggle",
+                        "scroll",
+                        "swipe_left",
+                        "swipe_right",
+                        "swipe_up",
+                        "swipe_down",
+                        "jarvis_menu",
+                        "emergency_stop",
                     }:
                         await safe_send({
                             "type": "desktop_control_status",

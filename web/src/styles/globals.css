@@ -32,6 +32,30 @@
   --shadow-glow:
     0 0 28px -6px rgba(125,211,252,0.22),
     0 0 64px -18px rgba(167,139,250,0.12);
+
+  /* Wave 4 — cross-cutting UI tokens (restrained glass; status colors only) */
+  --status-ok:     #86efac;
+  --status-warn:   #fbbf24;
+  --status-danger: #f87171;
+  --btn-glass-bg:  rgba(14, 24, 42, 0.55);
+  --btn-glass-border: rgba(125, 211, 252, 0.22);
+  --modal-scrim:   rgba(3, 7, 15, 0.55);
+  --tile-pad:      0.75rem;
+  --focus-ring:    0 0 0 2px rgba(125, 211, 252, 0.45);
+  --nav-height:    66px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
 }
 
 html, body, #root { height: 100%; width: 100%; }

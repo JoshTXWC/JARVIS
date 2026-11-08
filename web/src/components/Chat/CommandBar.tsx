@@ -294,6 +294,8 @@ export default function CommandBar({ embedded = false }: { embedded?: boolean })
             onClick={() => setModelOpen((v) => !v)}
             disabled={!connected || modelBusy}
             title={activeMeta?.summary || "Switch model"}
+            aria-label={`Model ${activeLabel}. ${activeMeta?.cloud ? "Cloud, usage may incur cost." : "Local."}`}
+            aria-expanded={modelOpen}
             className="h-10 max-w-[168px] px-2.5 rounded-lg flex items-center gap-1.5 text-left transition-all disabled:opacity-40"
             style={{
               background: "rgba(14,24,42,0.65)",
@@ -487,7 +489,8 @@ async function handleFile(f: File, add: (a: ChatAttachment) => void) {
   const form = new FormData();
   form.append("file", f);
   try {
-    const resp = await fetch("/api/upload", { method: "POST", body: form });
+    const { apiFetch: af } = await import("../../lib/session");
+    const resp = await af("/api/upload", { method: "POST", body: form });
     const data = await resp.json();
     if (data?.url) {
       add({
@@ -633,10 +636,10 @@ function ModelSection({
                 <div className="text-[9px] text-jarvis-cyan/55 truncate mt-0.5">
                   {m.skill_label || m.skill || "model"}
                   {m.cloud
-                    ? ` · ${m.provider_label || "cloud"}`
+                    ? ` · ${m.provider_label || "cloud"} · metered`
                     : m.vram_gb
-                      ? ` · ~${m.vram_gb} GB`
-                      : ""}
+                      ? ` · ~${m.vram_gb} GB · local`
+                      : " · local"}
                 </div>
               </button>
               <button

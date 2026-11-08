@@ -132,9 +132,8 @@ export default function App() {
   useEffect(() => {
     const cycleMode = () => {
       const st = useStore.getState();
-      const order = ["hud", "precision", "spatial"] as const;
-      const i = order.indexOf(st.desktopControlMode);
-      const next = order[(i + 1) % order.length];
+      // Combined Control = precision (spatial aliases to the same inject path).
+      const next = st.desktopControlMode === "hud" ? "precision" : "hud";
       st.setDesktopControlMode(next);
       wsClient.send({ type: "desktop_control", action: "mode", mode: next });
       window.jarvis?.send?.("jarvis:desktop-overlay-meta", { mode: next });

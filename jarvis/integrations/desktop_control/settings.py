@@ -37,13 +37,13 @@ class DesktopControlSettings:
     smoothing: float = 0.35
     acceleration: float = 1.15
     dead_zone: float = 0.004
-    pinch_threshold: float = 0.05
-    pinch_hold_ms: int = 40
-    click_debounce_ms: int = 180
+    pinch_threshold: float = 0.06
+    pinch_hold_ms: int = 0
+    click_debounce_ms: int = 120
     scroll_speed: float = 1.0
     scroll_threshold: float = 0.018
-    open_palm_freeze_ms: int = 450
-    fist_pause_ms: int = 400
+    open_palm_freeze_ms: int = 0  # 0 = off (was locking cursor during normal use)
+    fist_pause_ms: int = 900
     confidence_min: float = 0.45
 
     # Spatial tuning
@@ -97,6 +97,14 @@ class SettingsStore:
                 try:
                     raw = json.loads(self.path.read_text(encoding="utf-8"))
                     self._settings = DesktopControlSettings.from_dict(raw)
+                    # Migrate old defaults that made Precision feel broken:
+                    # brief open-palm freeze locked the cursor between pinches.
+                    if self._settings.open_palm_freeze_ms == 450:
+                        self._settings.open_palm_freeze_ms = 0
+                    if self._settings.fist_pause_ms == 400:
+                        self._settings.fist_pause_ms = 900
+                    if self._settings.pinch_threshold == 0.05:
+                        self._settings.pinch_threshold = 0.06
                 except Exception:  # noqa: BLE001
                     self._settings = DesktopControlSettings()
             return self._settings

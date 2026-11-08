@@ -3,11 +3,21 @@ export type HandsVizMode = "skeleton" | "minimal" | "hidden";
 
 export type HandLandmark = { x: number; y: number; z?: number };
 
+export type HandsCursorViz = {
+  phase: string;
+  u: number;
+  v: number;
+  approach: number;
+  hold: number;
+};
+
 export type HandsFrame = {
   t: number;
   hands: Array<Array<[number, number, number]>>;
   lost?: boolean;
   poses?: string[];
+  /** Control-mode fingertip cursor for the system overlay. */
+  cursor?: HandsCursorViz | null;
 };
 
 export type DesktopControlSettings = {

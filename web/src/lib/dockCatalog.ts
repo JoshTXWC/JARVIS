@@ -8,6 +8,9 @@ export const DOCKABLE_IDS = [
   "uptime",
   "toolFeed",
   "terminal",
+  "tools",
+  "tasks",
+  "workspace",
   "settings",
 ] as const;
 
@@ -23,6 +26,9 @@ export const DEFAULT_DOCKED: string[] = [
   "uptime",
   "toolFeed",
   "terminal",
+  "tools",
+  "tasks",
+  "workspace",
   "settings",
 ];
 
@@ -30,9 +36,12 @@ export const DOCK_META: Record<
   DockableId,
   { label: string; title: string }
 > = {
-  diag:     { label: "SYS",  title: "System Status" },
-  uptime:   { label: "UP",   title: "Uptime" },
-  toolFeed: { label: "TOOL", title: "Tool Feed" },
-  terminal: { label: "TERM", title: "Terminal" },
-  settings: { label: "SET",  title: "Settings" },
+  diag:      { label: "SYS",  title: "System Status" },
+  uptime:    { label: "UP",   title: "Uptime" },
+  toolFeed:  { label: "FEED", title: "Tool Feed" },
+  terminal:  { label: "TERM", title: "Terminal" },
+  tools:     { label: "TOOL", title: "Tools" },
+  tasks:     { label: "TASK", title: "Task Manager" },
+  workspace: { label: "SPACE", title: "Workspace" },
+  settings:  { label: "SET",  title: "Settings" },
 };

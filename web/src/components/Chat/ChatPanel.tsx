@@ -6,6 +6,7 @@
  */
 import { useCallback, useEffect, useRef, type ReactNode } from "react";
 import { useStore, type ChatAttachment, type ChatEntry } from "../../lib/store";
+import SafeMarkdown from "./SafeMarkdown";
 
 export default function ChatPanel({ embedded = false }: { embedded?: boolean }) {
   const chat = useStore((s) => s.chat);
@@ -169,7 +170,7 @@ function MessageTile({ entry }: { entry: ChatEntry }) {
       time={time}
     >
       <div className="text-jarvis-ice/95 whitespace-pre-wrap break-words">
-        {renderMarkdownLite(text)}
+        <SafeMarkdown text={text} />
         {streaming && (
           <span className="inline-block w-[7px] h-[13px] bg-jarvis-aqua/80 ml-0.5 align-middle animate-pulse" />
         )}
@@ -306,42 +307,3 @@ function PromptIcon() {
   );
 }
 
-/** Minimal markdown — bold, inline code, links. */
-function renderMarkdownLite(text: string): React.ReactNode {
-  const parts: React.ReactNode[] = [];
-  const re = /(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\(https?:\/\/[^\s)]+\)|https?:\/\/[^\s<>()]+)/g;
-  let last = 0;
-  let m: RegExpExecArray | null;
-  let i = 0;
-  while ((m = re.exec(text)) !== null) {
-    if (m.index > last) parts.push(text.slice(last, m.index));
-    const tok = m[0];
-    if (tok.startsWith("**")) {
-      parts.push(<strong key={i++} className="text-jarvis-aqua font-semibold">{tok.slice(2, -2)}</strong>);
-    } else if (tok.startsWith("`")) {
-      parts.push(<code key={i++} className="text-mono text-[12px] bg-jarvis-cyan/10 px-1 rounded text-jarvis-aqua">{tok.slice(1, -1)}</code>);
-    } else if (tok.startsWith("[")) {
-      const mm = /^\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)$/.exec(tok);
-      if (mm) {
-        parts.push(
-          <a key={i++} href={mm[2]} target="_blank" rel="noreferrer noopener"
-             className="text-jarvis-aqua underline decoration-jarvis-cyan/40 hover:decoration-jarvis-aqua hover:text-jarvis-cyan">
-            {mm[1]}
-          </a>
-        );
-      } else {
-        parts.push(tok);
-      }
-    } else if (tok.startsWith("http")) {
-      parts.push(
-        <a key={i++} href={tok} target="_blank" rel="noreferrer noopener"
-           className="text-jarvis-aqua underline decoration-jarvis-cyan/40 hover:decoration-jarvis-aqua break-all">
-          {tok}
-        </a>
-      );
-    }
-    last = m.index + tok.length;
-  }
-  if (last < text.length) parts.push(text.slice(last));
-  return parts;
-}

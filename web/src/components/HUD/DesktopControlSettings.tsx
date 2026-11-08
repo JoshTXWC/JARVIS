@@ -1,11 +1,12 @@
 /**
- * Settings → Barehands Desktop Control (opt-in, off by default).
+ * Settings → Hands / Desktop — big interactive controls, minimal copy.
  */
 import { useEffect, useState } from "react";
 import { apiFetch } from "../../lib/session";
 import {
   requestDesktopOverlay,
   sendDesktopControlAction,
+  setDesktopInjectArmed,
 } from "../../lib/hands/desktopBridge";
 import { useStore } from "../../lib/store";
 
@@ -15,6 +16,7 @@ type Viz = "skeleton" | "minimal" | "hidden";
 export default function DesktopControlSettings() {
   const gestureEnabled = useStore((s) => s.gestureEnabled);
   const setGestureEnabled = useStore((s) => s.setGestureEnabled);
+  const gestureStatus = useStore((s) => s.gestureStatus);
   const enabled = useStore((s) => s.desktopControlEnabled);
   const setEnabled = useStore((s) => s.setDesktopControlEnabled);
   const mode = useStore((s) => s.desktopControlMode);
@@ -26,13 +28,11 @@ export default function DesktopControlSettings() {
   const paused = useStore((s) => s.desktopPaused);
   const setPaused = useStore((s) => s.setDesktopPaused);
   const gesture = useStore((s) => s.desktopGesture);
-  const calibrating = useStore((s) => s.desktopCalibrating);
-  const setCalibrating = useStore((s) => s.setDesktopCalibrating);
 
   const [sensitivity, setSensitivity] = useState(1);
   const [smoothing, setSmoothing] = useState(0.35);
-  const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
+  const inElectron = typeof window !== "undefined" && !!window.jarvis?.send;
 
   useEffect(() => {
     void apiFetch("/api/desktop-control/status")
@@ -57,30 +57,49 @@ export default function DesktopControlSettings() {
         body: JSON.stringify({ patch }),
       });
       const j = await r.json();
-      setStatus(j?.enabled ? `mode=${j.mode}` : "disabled");
-      if (window.jarvis?.send) {
-        window.jarvis.send("jarvis:desktop-overlay-meta", {
-          mode: j?.mode,
-          viz_mode: viz,
-          overlay_opacity: 0.85,
-          paused: j?.paused,
-          gesture: j?.gesture,
-        });
-      }
-    } catch (e: any) {
-      setStatus(e?.message || "update failed");
+      window.jarvis?.send?.("jarvis:desktop-overlay-meta", {
+        mode: j?.mode ?? mode,
+        viz_mode: viz,
+        paused: j?.paused ?? paused,
+        gesture: j?.gesture ?? gesture,
+      });
+    } catch {
+      /* ignore */
     } finally {
       setBusy(false);
     }
   };
 
-  const toggleEnabled = async (v: boolean) => {
-    if (v && !gestureEnabled) setGestureEnabled(true);
-    setEnabled(v);
-    sendDesktopControlAction("enable", { enabled: v });
-    await apply({ enabled: v });
-    if (v && overlay) requestDesktopOverlay(true);
-    if (!v) requestDesktopOverlay(false);
+  const armDesktop = async (v: boolean) => {
+    if (v) {
+      if (!gestureEnabled) setGestureEnabled(true);
+      setOverlay(true);
+      setMode("precision");
+      setPaused(false);
+      setEnabled(true);
+      setDesktopInjectArmed(true);
+      sendDesktopControlAction("enable", { enabled: true });
+      sendDesktopControlAction("mode", { mode: "precision" });
+      await apply({
+        enabled: true,
+        overlay_enabled: true,
+        mode: "precision",
+        viz_mode: "skeleton",
+      });
+      requestDesktopOverlay(true);
+      window.jarvis?.send?.("jarvis:desktop-overlay-meta", {
+        mode: "precision",
+        viz_mode: "skeleton",
+        paused: false,
+        gesture: "armed",
+      });
+      return;
+    }
+    setEnabled(false);
+    setDesktopInjectArmed(false);
+    sendDesktopControlAction("enable", { enabled: false });
+    await apply({ enabled: false });
+    requestDesktopOverlay(false);
   };
 
   const changeMode = async (m: Mode) => {
@@ -89,192 +108,242 @@ export default function DesktopControlSettings() {
     await apply({ mode: m });
   };
 
-  const runCalibration = async () => {
-    setCalibrating(true);
-    // Comfortable default active region — interactive wizard can refine later.
-    await apply({
-      calibration: { x0: 0.18, y0: 0.12, x1: 0.82, y1: 0.88 },
-    });
-    setStatus("calibration region set — move hand in view to test");
-    setTimeout(() => setCalibrating(false), 1200);
-  };
+  const live = gestureEnabled
+    ? gesture || gestureStatus || "tracking"
+    : "hands off";
 
   return (
-    <div className="space-y-3">
-      <p className="text-[11px] text-jarvis-ice/45 leading-relaxed">
-        System-wide Windows control via the same Hands webcam pipeline. Opt-in,
-        local-only, and off by default. Emergency stop: Ctrl+Shift+Alt+Esc.
-      </p>
+    <div className="space-y-4">
+      {/* Status strip */}
+      <div className="grid grid-cols-3 gap-2">
+        <StatusPill
+          label="Bridge"
+          value={inElectron ? "Electron" : "Browser"}
+          ok={inElectron}
+        />
+        <StatusPill label="Hands" value={gestureEnabled ? "On" : "Off"} ok={gestureEnabled} />
+        <StatusPill label="Track" value={String(live).slice(0, 14)} ok={!!gesture && gesture !== "lost" && gesture !== "seeking"} />
+      </div>
 
-      <Toggle
-        label="Enable desktop control"
-        hint={status || (enabled ? "injection armed" : "disabled")}
-        value={enabled}
-        onChange={(v) => void toggleEnabled(v)}
-        disabled={busy}
-      />
+      {!inElectron && (
+        <div
+          className="rounded-xl px-3 py-3 text-[12px] text-amber-100/90"
+          style={{ background: "rgba(251,191,36,0.12)", boxShadow: "inset 0 0 0 1px rgba(251,191,36,0.35)" }}
+        >
+          Use <span className="text-mono">run-app.bat</span> for desktop overlay.
+        </div>
+      )}
 
-      <div className="grid grid-cols-3 gap-1.5">
-        {([
-          ["hud", "HUD"],
-          ["precision", "Precision"],
-          ["spatial", "Spatial"],
-        ] as [Mode, string][]).map(([id, label]) => (
-          <button
-            key={id}
-            type="button"
+      {/* Primary actions */}
+      <div className="grid grid-cols-2 gap-2">
+        <BigToggle
+          label="Hands"
+          active={gestureEnabled}
+          onClick={() => setGestureEnabled(!gestureEnabled)}
+        />
+        <BigToggle
+          label="Desktop"
+          active={enabled}
+          onClick={() => void armDesktop(!enabled)}
+          disabled={busy || !inElectron}
+        />
+      </div>
+
+      {/* Mode — HUD tiles vs combined desktop Control (mouse + windows) */}
+      <div>
+        <div className="text-mono text-[9px] tracking-[0.28em] uppercase text-jarvis-cyan/45 mb-2">
+          Mode
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          <SegBtn
+            label="HUD"
+            active={mode === "hud"}
             disabled={!enabled || busy}
-            onClick={() => void changeMode(id)}
-            className={`rounded-md px-2 py-2 text-mono text-[9px] tracking-[0.16em] uppercase transition-colors disabled:opacity-40 ${
-              mode === id ? "text-jarvis-ice" : "text-jarvis-ice/50 hover:text-jarvis-ice/80"
-            }`}
-            style={{
-              background:
-                mode === id ? "rgba(125,211,252,0.16)" : "rgba(8,14,26,0.4)",
-              boxShadow:
-                mode === id
-                  ? "inset 0 0 0 1px rgba(125,211,252,0.45)"
-                  : "inset 0 0 0 1px rgba(125,211,252,0.12)",
-            }}
-          >
-            {label}
-          </button>
-        ))}
+            onClick={() => void changeMode("hud")}
+          />
+          <SegBtn
+            label="Control"
+            active={mode === "precision" || mode === "spatial"}
+            disabled={!enabled || busy}
+            onClick={() => void changeMode("precision")}
+          />
+        </div>
+        <p className="mt-2 text-[11px] text-jarvis-ice/45 leading-snug">
+          Index tip cursor · approach locks · short pinch=click · hold+move=drag · 2×pinch=right · fist=window · 2 fing=scroll
+        </p>
       </div>
 
-      <Toggle
-        label="Floating overlay"
-        hint="Click-through skeleton across the desktop"
-        value={overlay}
-        onChange={(v) => {
-          setOverlay(v);
-          if (enabled && v) requestDesktopOverlay(true);
-          else requestDesktopOverlay(false);
-          void apply({ overlay_enabled: v });
-        }}
-      />
-
-      <div className="grid grid-cols-3 gap-1.5">
-        {([
-          ["skeleton", "Skeleton"],
-          ["minimal", "Cursor"],
-          ["hidden", "Hidden"],
-        ] as [Viz, string][]).map(([id, label]) => (
-          <button
-            key={id}
-            type="button"
+      {/* Overlay viz */}
+      <div>
+        <div className="text-mono text-[9px] tracking-[0.28em] uppercase text-jarvis-cyan/45 mb-2">
+          Overlay
+        </div>
+        <div className="grid grid-cols-4 gap-2">
+          <SegBtn
+            label={overlay ? "Show" : "Hide"}
+            active={overlay}
             onClick={() => {
-              setViz(id);
-              void apply({ viz_mode: id });
-              window.jarvis?.send?.("jarvis:desktop-overlay-meta", { viz_mode: id });
+              const next = !overlay;
+              setOverlay(next);
+              if (next) requestDesktopOverlay(true);
+              else requestDesktopOverlay(false);
+              void apply({ overlay_enabled: next });
             }}
-            className={`rounded-md px-2 py-1.5 text-mono text-[9px] tracking-[0.14em] uppercase ${
-              viz === id ? "text-jarvis-ice" : "text-jarvis-ice/45"
-            }`}
-            style={{
-              boxShadow: "inset 0 0 0 1px rgba(125,211,252,0.16)",
-              background: viz === id ? "rgba(125,211,252,0.12)" : "transparent",
-            }}
-          >
-            {label}
-          </button>
-        ))}
+          />
+          {([
+            ["skeleton", "Full"],
+            ["minimal", "Dot"],
+            ["hidden", "Off"],
+          ] as [Viz, string][]).map(([id, label]) => (
+            <SegBtn
+              key={id}
+              label={label}
+              active={viz === id}
+              onClick={() => {
+                setViz(id);
+                void apply({ viz_mode: id });
+                window.jarvis?.send?.("jarvis:desktop-overlay-meta", { viz_mode: id });
+              }}
+            />
+          ))}
+        </div>
       </div>
 
-      <Slider
-        label={`Sensitivity ${sensitivity.toFixed(2)}`}
-        min={0.4}
-        max={2.2}
-        step={0.05}
-        value={sensitivity}
-        onChange={setSensitivity}
-        onCommit={(v) => void apply({ sensitivity: v })}
-      />
-      <Slider
-        label={`Smoothing ${smoothing.toFixed(2)}`}
-        min={0}
-        max={0.85}
-        step={0.05}
-        value={smoothing}
-        onChange={setSmoothing}
-        onCommit={(v) => void apply({ smoothing: v })}
-      />
+      {/* Feel */}
+      <div className="space-y-3">
+        <SliderRow
+          label="Sensitivity"
+          value={sensitivity}
+          min={0.4}
+          max={2.2}
+          step={0.05}
+          onChange={setSensitivity}
+          onCommit={(v) => void apply({ sensitivity: v })}
+        />
+        <SliderRow
+          label="Smooth"
+          value={smoothing}
+          min={0}
+          max={0.85}
+          step={0.05}
+          onChange={setSmoothing}
+          onCommit={(v) => void apply({ smoothing: v })}
+        />
+        <p className="text-[10px] text-jarvis-ice/35 -mt-1 px-1">
+          Tip cursor is raw (no smooth lag). Smooth only affects legacy backend path.
+        </p>
+      </div>
 
-      <div className="flex gap-1.5">
-        <Action
+      <div className="grid grid-cols-2 gap-2">
+        <SegBtn
           label={paused ? "Resume" : "Pause"}
+          active={paused}
           onClick={() => {
             const next = !paused;
             setPaused(next);
             sendDesktopControlAction("pause", { paused: next });
           }}
         />
-        <Action
-          label={calibrating ? "Calibrating…" : "Quick calibrate"}
-          onClick={() => void runCalibration()}
-        />
-        <Action
+        <SegBtn
           label="E-Stop"
           danger
+          active={false}
           onClick={() => {
             setPaused(true);
             sendDesktopControlAction("emergency_stop");
           }}
         />
       </div>
-
-      <p className="text-[10px] text-jarvis-ice/35 leading-relaxed">
-        Live gesture: <span className="text-jarvis-cyan/70">{gesture || "—"}</span>
-        {" · "}
-        Shortcuts: Ctrl+Shift+Alt+M mode · P pause · Esc emergency
-      </p>
     </div>
   );
 }
 
-function Toggle({
-  label, hint, value, onChange, disabled,
+function StatusPill({ label, value, ok }: { label: string; value: string; ok: boolean }) {
+  return (
+    <div
+      className="rounded-xl px-2.5 py-2.5 min-w-0"
+      style={{
+        background: "rgba(8,14,26,0.55)",
+        boxShadow: "inset 0 0 0 1px rgba(125,211,252,0.14)",
+      }}
+    >
+      <div className="text-[8px] text-mono tracking-[0.22em] uppercase text-jarvis-cyan/40">{label}</div>
+      <div className={`mt-1 text-[12px] text-mono truncate ${ok ? "text-emerald-200/90" : "text-jarvis-ice/55"}`}>
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function BigToggle({
+  label, active, onClick, disabled,
 }: {
-  label: string; hint?: string; value: boolean; onChange: (v: boolean) => void; disabled?: boolean;
+  label: string; active: boolean; onClick: () => void; disabled?: boolean;
 }) {
   return (
     <button
       type="button"
       disabled={disabled}
-      onClick={() => onChange(!value)}
-      className="w-full flex items-center justify-between gap-3 rounded-lg px-3 py-2.5 text-left disabled:opacity-40"
-      style={{ boxShadow: "inset 0 0 0 1px rgba(125,211,252,0.14)", background: "rgba(8,14,26,0.35)" }}
+      onClick={onClick}
+      className="rounded-2xl px-3 py-5 text-left transition-all disabled:opacity-40"
+      style={{
+        background: active
+          ? "linear-gradient(160deg, rgba(34,211,238,0.28), rgba(8,14,26,0.55))"
+          : "rgba(8,14,26,0.45)",
+        boxShadow: active
+          ? "inset 0 0 0 1px rgba(125,211,252,0.55), 0 0 24px rgba(34,211,238,0.12)"
+          : "inset 0 0 0 1px rgba(125,211,252,0.14)",
+      }}
     >
-      <span>
-        <span className="block text-[12px] text-jarvis-ice/85">{label}</span>
-        {hint && <span className="block text-[10px] text-jarvis-ice/40 mt-0.5">{hint}</span>}
-      </span>
-      <span
-        className="w-9 h-5 rounded-full relative shrink-0"
-        style={{
-          background: value ? "rgba(34,211,238,0.45)" : "rgba(255,255,255,0.08)",
-          boxShadow: "inset 0 0 0 1px rgba(125,211,252,0.25)",
-        }}
-      >
-        <span
-          className="absolute top-0.5 w-4 h-4 rounded-full bg-jarvis-ice/90 transition-all"
-          style={{ left: value ? "18px" : "2px" }}
-        />
-      </span>
+      <div className="text-mono text-[10px] tracking-[0.28em] uppercase text-jarvis-cyan/50">{label}</div>
+      <div className={`mt-2 text-[20px] text-display tracking-[0.12em] ${active ? "text-jarvis-ice" : "text-jarvis-ice/40"}`}>
+        {active ? "ON" : "OFF"}
+      </div>
     </button>
   );
 }
 
-function Slider({
-  label, min, max, step, value, onChange, onCommit,
+function SegBtn({
+  label, active, onClick, disabled, danger,
 }: {
-  label: string; min: number; max: number; step: number;
-  value: number; onChange: (v: number) => void; onCommit: (v: number) => void;
+  label: string; active: boolean; onClick: () => void; disabled?: boolean; danger?: boolean;
 }) {
   return (
-    <label className="block">
-      <div className="text-[10px] text-mono tracking-[0.16em] uppercase text-jarvis-cyan/45 mb-1">
-        {label}
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onClick}
+      className="rounded-xl px-2 py-3 text-mono text-[10px] tracking-[0.16em] uppercase transition-all disabled:opacity-35"
+      style={{
+        background: danger
+          ? "rgba(251,113,133,0.14)"
+          : active
+            ? "rgba(125,211,252,0.2)"
+            : "rgba(8,14,26,0.4)",
+        boxShadow: danger
+          ? "inset 0 0 0 1px rgba(251,113,133,0.4)"
+          : active
+            ? "inset 0 0 0 1px rgba(125,211,252,0.5)"
+            : "inset 0 0 0 1px rgba(125,211,252,0.12)",
+        color: danger ? "rgba(254,205,211,0.95)" : active ? "rgba(224,242,254,0.95)" : "rgba(186,230,253,0.45)",
+      }}
+    >
+      {label}
+    </button>
+  );
+}
+
+function SliderRow({
+  label, value, min, max, step, onChange, onCommit,
+}: {
+  label: string; value: number; min: number; max: number; step: number;
+  onChange: (v: number) => void; onCommit: (v: number) => void;
+}) {
+  return (
+    <label className="block rounded-xl px-3 py-3" style={{ background: "rgba(8,14,26,0.35)", boxShadow: "inset 0 0 0 1px rgba(125,211,252,0.1)" }}>
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-mono text-[9px] tracking-[0.22em] uppercase text-jarvis-cyan/45">{label}</span>
+        <span className="text-mono text-[11px] text-jarvis-ice/80">{value.toFixed(2)}</span>
       </div>
       <input
         type="range"
@@ -285,32 +354,8 @@ function Slider({
         onChange={(e) => onChange(Number(e.target.value))}
         onMouseUp={(e) => onCommit(Number((e.target as HTMLInputElement).value))}
         onTouchEnd={(e) => onCommit(Number((e.target as HTMLInputElement).value))}
-        className="w-full accent-cyan-300"
+        className="w-full accent-cyan-300 h-2"
       />
     </label>
-  );
-}
-
-function Action({
-  label, onClick, danger,
-}: {
-  label: string; onClick: () => void; danger?: boolean;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`flex-1 rounded-md px-2 py-2 text-mono text-[9px] tracking-[0.14em] uppercase ${
-        danger ? "text-rose-200/90" : "text-jarvis-ice/75"
-      }`}
-      style={{
-        boxShadow: danger
-          ? "inset 0 0 0 1px rgba(251,113,133,0.35)"
-          : "inset 0 0 0 1px rgba(125,211,252,0.2)",
-        background: danger ? "rgba(251,113,133,0.1)" : "rgba(8,14,26,0.4)",
-      }}
-    >
-      {label}
-    </button>
   );
 }

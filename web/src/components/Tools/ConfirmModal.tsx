@@ -21,7 +21,7 @@ export default function ConfirmModal() {
 
   const respond = (approved: boolean) => {
     if (!top) return;
-    wsClient.confirm(top.id, approved);
+    wsClient.confirm(top.id, approved, top.token);
     pop(top.id);
   };
 

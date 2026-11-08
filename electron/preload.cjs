@@ -14,16 +14,25 @@ const ALLOWED_OUT = new Set([
   "jarvis:hide",
   "jarvis:toggle-visibility",
   "jarvis:hands-overlay-frame",
+  "jarvis:hands-active",
   "jarvis:desktop-overlay-open",
   "jarvis:desktop-overlay-close",
   "jarvis:desktop-overlay-meta",
+  "jarvis:desktop-input",
+  "jarvis:desktop-inject-arm",
 ]);
+
+const ALLOWED_INVOKE = new Set(["jarvis:virtual-screen"]);
 
 contextBridge.exposeInMainWorld("jarvis", {
   // Renderer → main (fire-and-forget signal, no return).
   send: (channel, payload) => {
     if (!ALLOWED_OUT.has(channel)) return;
     ipcRenderer.send(channel, payload);
+  },
+  invoke: (channel, payload) => {
+    if (!ALLOWED_INVOKE.has(channel)) return Promise.resolve(null);
+    return ipcRenderer.invoke(channel, payload);
   },
   // Main → renderer subscription.
   on: (channel, cb) => {

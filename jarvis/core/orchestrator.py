@@ -33,6 +33,7 @@ from .permissions import (
     PermissionManager,
     PermissionRequest,
 )
+from .task_control import TaskController, TaskState
 from .responses import core_reply
 from .style import clean_assistant_text, is_malformed_reply
 
@@ -104,6 +105,7 @@ class Orchestrator:
         # in-flight task. Heavy tools (image_generate, image_to_3d,
         # text_to_3d) protect their work via UNINTERRUPTIBLE_TOOLS below.
         self.busy_tool: str | None = None
+        self.tasks = TaskController(store_dir=self.cfg.project_root / "data" / "tasks")
 
         # Default emit-hook: lift tool results carrying a __JARVIS_MEDIA__
         # JSON payload into a proper MEDIA event. This is what makes
@@ -440,10 +442,30 @@ class Orchestrator:
                 ),
             )
 
+        self.tasks.start(user_text)
+        self.tasks.set_state(TaskState.PLANNING)
+        ok = True
+        err = ""
         try:
+            self.tasks.set_state(TaskState.RUNNING)
             async for ev in self._handle_user_message_inner(user_text, attachments):
                 yield ev
+        except asyncio.CancelledError:
+            ok = False
+            err = "cancelled"
+            self.tasks.set_state(TaskState.CANCELLED)
+            raise
+        except Exception as e:  # noqa: BLE001
+            ok = False
+            err = str(e)
+            raise
         finally:
+            if self.tasks.current and self.tasks.current.state not in {
+                TaskState.CANCELLED.value, TaskState.FAILED.value, TaskState.COMPLETED.value,
+            }:
+                self.tasks.finish(ok=ok, error=err)
+            elif self.tasks.current and self.tasks.current.state == TaskState.CANCELLED.value:
+                self.tasks.finish(ok=False, error="cancelled")
             if override_token is not None:
                 self.brain.reset_model_override(override_token)
 
@@ -864,6 +886,15 @@ class Orchestrator:
 
     # ------------------------------------------------------------------
     async def _invoke_tool(self, tc: ToolCall) -> AsyncIterator[Event]:
+        # Pause / cancel gate — durable control at tool boundaries.
+        await self.tasks.wait_if_paused()
+        self.tasks.bump_hop()
+        self.tasks.save_checkpoint({
+            "tool": tc.name,
+            "args_keys": sorted((tc.args or {}).keys()),
+            "hops": self.tasks.current.hops if self.tasks.current else 0,
+        })
+
         tool: Tool | None = self.registry.get(tc.name)
         if tool is None:
             yield Event(
@@ -880,23 +911,34 @@ class Orchestrator:
             )
             return
 
+        from .secrets import redact_args, redact_text
+
         preview = tool.preview(tc.args)
+        safe_preview = redact_text(preview)
         req = PermissionRequest(
             tool=tool.name, args=tc.args, permission=tool.permission, preview=preview
         )
 
         yield Event(
             EventKind.TOOL_PROPOSED,
-            text=preview,
-            payload={"tool": tool.name, "permission": tool.permission.value, "args": tc.args},
+            text=safe_preview,
+            payload={
+                "tool": tool.name,
+                "permission": tool.permission.value,
+                "args": redact_args(tc.args),
+            },
         )
 
         decision = self.permissions.evaluate(req)
         if decision is Decision.ASK:
+            self.tasks.set_state(TaskState.WAITING_FOR_APPROVAL)
+            grant = self.permissions.issue_grant(req, session_id=getattr(self, "_session_id", ""))
             fut: asyncio.Future = asyncio.get_running_loop().create_future()
+            # Attach grant token so WS can bind the UI approval.
+            req.reason = grant.token
             yield Event(
                 EventKind.CONFIRMATION,
-                text=preview,
+                text=safe_preview,
                 confirm_req=req,
                 confirm_future=fut,
             )
@@ -904,14 +946,30 @@ class Orchestrator:
                 approved = await fut
             except asyncio.CancelledError:
                 approved = False
+            # Pause/cancel gate after the confirm UI returns.
+            await self.tasks.wait_if_paused()
             if not approved:
                 decision = Decision.DENY
             else:
-                decision = Decision.ALLOW
+                # Revalidate on resume — mode may have tightened; never skip hard denials.
+                recheck = self.permissions.evaluate(req)
+                if recheck is Decision.DENY:
+                    decision = Decision.DENY
+                    safe_preview = "Denied after revalidation"
+                elif not self.permissions.consume_grant(
+                    grant.token, tool.name, tc.args, getattr(self, "_session_id", "")
+                ):
+                    decision = Decision.DENY
+                    safe_preview = "Approval expired or arguments changed — denied"
+                else:
+                    decision = Decision.ALLOW
+                    self.tasks.set_state(TaskState.RUNNING)
 
         if decision is Decision.DENY:
             denial = f"Denied by policy or user: {tool.name}"
-            self.actions.record("denied", tool=tool.name, args=tc.args, preview=preview)
+            self.actions.record(
+                "denied", tool=tool.name, args=redact_args(tc.args), preview=safe_preview
+            )
             yield Event(
                 EventKind.TOOL_RESULT,
                 text=denial,
@@ -1028,17 +1086,21 @@ class Orchestrator:
         # Append a proper tool-result message. With native tool calling we use
         # role="tool" + tool_call_id; otherwise we keep the legacy XML marker
         # that ReAct models expect.
+        # Tag tool/web/file content as untrusted — never authorizes actions.
+        untrusted = (
+            f"<untrusted source=\"tool:{tool.name}\">\n{history_text}\n</untrusted>"
+        )
         if tc.call_id:
             self._history.append({
                 "role": "tool",
                 "tool_call_id": tc.call_id,
                 "name": tool.name,
-                "content": history_text,
+                "content": untrusted,
             })
         else:
             marker = (
                 f"<tool_result name=\"{tool.name}\" ok=\"{str(ok).lower()}\">"
-                f"{history_text}</tool_result>"
+                f"{untrusted}</tool_result>"
             )
             self._history.append({"role": "user", "content": marker})
 

@@ -9,12 +9,17 @@ import {
   packLandmarks,
   publishHandsFrame,
   requestDesktopOverlay,
+  sendDesktopInput,
+  setDesktopInjectArmed,
 } from "../../lib/hands/desktopBridge";
+import { PrecisionController, type ScreenRect } from "../../lib/hands/precisionControl";
 import { useStore } from "../../lib/store";
 
-const PINCH_THRESHOLD = 0.05;
+const PINCH_THRESHOLD = 0.06;
 /** Detect every animation frame for snappy tracking. */
 const DETECT_MS = 0;
+/** Backup tick while the HUD is occluded — Chromium can still starve RAF. */
+const HIDDEN_DETECT_MS = 33;
 const STATUS_MS = 500;
 /** 1 = raw fingertip (lowest cursor lag). */
 const FOLLOW = 1;
@@ -134,6 +139,7 @@ export default function GestureOverlay() {
   const circleRefs = useRef<[HTMLDivElement | null, HTMLDivElement | null]>([null, null]);
   const landmarkerRef = useRef<any>(null);
   const rafRef = useRef(0);
+  const hiddenTimerRef = useRef(0);
   const lastDetectRef = useRef(0);
   const lastStatusRef = useRef(0);
   const lastPinchRef = useRef([false, false]);
@@ -143,12 +149,19 @@ export default function GestureOverlay() {
   const scaleIdRef = useRef<string | null>(null);
   const scaleBaseDistRef = useRef(0);
   const scaleBaseBoxRef = useRef<{ w: number; h: number } | null>(null);
-  /** When Precision/Spatial inject OS input, skip HUD DOM click/drag. */
+  const precisionRef = useRef(new PrecisionController());
+  const screenRef = useRef<ScreenRect>({ x: 0, y: 0, width: 1920, height: 1080 });
+  /** When Precision injects OS input, skip HUD DOM click/drag. */
   const desktopInjectRef = useRef(false);
   const desktopControlEnabledRef = useRef(desktopControlEnabled);
   const desktopOverlayEnabledRef = useRef(desktopOverlayEnabled);
+  const desktopModeRef = useRef(desktopControlMode);
+  const desktopPausedRef = useRef(desktopPaused);
   desktopControlEnabledRef.current = desktopControlEnabled;
   desktopOverlayEnabledRef.current = desktopOverlayEnabled;
+  desktopModeRef.current = desktopControlMode;
+  desktopPausedRef.current = desktopPaused;
+  // Combined control = Mouse + Windows (precision or spatial both inject).
   desktopInjectRef.current =
     desktopControlEnabled &&
     !desktopPaused &&
@@ -159,6 +172,7 @@ export default function GestureOverlay() {
       stop();
       setGestureStatus("");
       requestDesktopOverlay(false);
+      window.jarvis?.send?.("jarvis:hands-active", false);
       try {
         delete document.body.dataset.jarvisHands;
       } catch { /* noop */ }
@@ -167,6 +181,7 @@ export default function GestureOverlay() {
     try {
       document.body.dataset.jarvisHands = "1";
     } catch { /* noop */ }
+    window.jarvis?.send?.("jarvis:hands-active", true);
 
     let cancelled = false;
 
@@ -214,7 +229,7 @@ export default function GestureOverlay() {
         if (!video) return;
         video.srcObject = stream;
         await video.play();
-        setGestureStatus("hands · pinch=click · fist=drag · 2 hands=scale");
+        setGestureStatus("hands · tip cursor · pinch lock · hold-drag · fist=window");
         tick();
       } catch (e: any) {
         console.error("[hands]", e);
@@ -262,7 +277,8 @@ export default function GestureOverlay() {
         return;
       }
 
-      if (now - lastDetectRef.current >= DETECT_MS) {
+      const minGap = document.hidden ? HIDDEN_DETECT_MS : DETECT_MS;
+      if (now - lastDetectRef.current >= minGap) {
         lastDetectRef.current = now;
         const videoW = video.videoWidth || 1280;
         const videoH = video.videoHeight || 720;
@@ -305,7 +321,9 @@ export default function GestureOverlay() {
           const landmarks = hands[i];
           const mode = handLabel(landmarks);
           const raw = mapLandmark(landmarks[8], videoW, videoH, sw, sh);
-          const tip = smoothToward(i, raw);
+          // Desktop inject: lock HUD tip to raw index (no lag). HUD-only can ease.
+          const tip = desktopInjectRef.current ? raw : smoothToward(i, raw);
+          if (desktopInjectRef.current) smoothRef.current[i] = raw;
           primary.push({ mode, tip });
           paintCircle(i, tip, mode);
         }
@@ -314,20 +332,53 @@ export default function GestureOverlay() {
           paintCircle(i, null, null);
         }
 
-        // Shared pipeline → desktop control + system-wide overlay (no 2nd camera).
-        if (desktopControlEnabledRef.current || desktopOverlayEnabledRef.current) {
-          publishHandsFrame(
-            {
-              t: now,
-              hands: packLandmarks(hands),
-              lost: hands.length === 0,
-              poses: primary.map((p) => p.mode),
-            },
-            { overlay: desktopOverlayEnabledRef.current },
+        // Direct OS injection (Electron → Win32) — combined Mouse + Windows.
+        const controlArmed =
+          desktopControlEnabledRef.current &&
+          !desktopPausedRef.current &&
+          (desktopModeRef.current === "precision" || desktopModeRef.current === "spatial");
+        let controlPose: string | null = null;
+        let controlCursor: {
+          phase: string;
+          u: number;
+          v: number;
+          approach: number;
+          hold: number;
+        } | null = null;
+        if (controlArmed) {
+          const lm = hands[0] || null;
+          const { ops, pose, viz } = precisionRef.current.frame(
+            lm,
+            screenRef.current,
+            now,
           );
-          if (primary[0]) setDesktopGesture(primary[0].mode);
-          else setDesktopGesture(hands.length ? "track" : "lost");
+          for (const op of ops) sendDesktopInput(op);
+          controlPose = pose;
+          controlCursor = viz;
+          setDesktopGesture(pose);
+        } else if (primary[0]) {
+          setDesktopGesture(primary[0].mode);
+        } else {
+          setDesktopGesture(hands.length ? "track" : "seeking");
         }
+
+        // Shared pipeline → desktop control + system-wide overlay (no 2nd camera).
+        // Always publish while Hands is live so the Electron overlay leaves "idle".
+        publishHandsFrame(
+          {
+            t: now,
+            hands: packLandmarks(hands),
+            lost: hands.length === 0,
+            poses: controlPose
+              ? [controlPose, ...primary.slice(1).map((p) => p.mode)]
+              : primary.map((p) => p.mode),
+            cursor: controlCursor,
+          },
+          {
+            overlay: true,
+            inject: desktopControlEnabledRef.current,
+          },
+        );
 
         // Broadcast index-finger cursor for Neural + any listeners (raw, no lag).
         if (primary[0]) {
@@ -534,26 +585,99 @@ export default function GestureOverlay() {
       rafRef.current = requestAnimationFrame(tick);
     };
 
+    // When the HUD is occluded, RAF may stall even with Chromium flags —
+    // keep a low-rate interval so desktop control still receives frames.
+    const onVis = () => {
+      if (document.hidden) {
+        if (!hiddenTimerRef.current) {
+          hiddenTimerRef.current = window.setInterval(() => tick(), HIDDEN_DETECT_MS);
+        }
+      } else if (hiddenTimerRef.current) {
+        window.clearInterval(hiddenTimerRef.current);
+        hiddenTimerRef.current = 0;
+      }
+    };
+    document.addEventListener("visibilitychange", onVis);
+    onVis();
+
     void boot();
     return () => {
       cancelled = true;
+      document.removeEventListener("visibilitychange", onVis);
       stop();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabled]);
 
   // Overlay lifecycle — never reopen the webcam.
+  // Show system-wide skeleton whenever Hands + overlay are on.
   useEffect(() => {
-    if (enabled && desktopControlEnabled && desktopOverlayEnabled) {
+    const want = enabled && desktopOverlayEnabled;
+    if (want) {
       requestDesktopOverlay(true);
+      window.jarvis?.send?.("jarvis:desktop-overlay-meta", {
+        mode: desktopControlEnabled ? desktopControlMode : "hud",
+        viz_mode: useStore.getState().desktopVizMode,
+        paused: desktopPaused,
+      });
     } else {
       requestDesktopOverlay(false);
     }
-  }, [enabled, desktopControlEnabled, desktopOverlayEnabled]);
+  }, [
+    enabled,
+    desktopControlEnabled,
+    desktopOverlayEnabled,
+    desktopControlMode,
+    desktopPaused,
+  ]);
+
+  // Arm / disarm the Win32 inject worker + refresh virtual screen bounds.
+  useEffect(() => {
+    const armed =
+      enabled &&
+      desktopControlEnabled &&
+      !desktopPaused &&
+      (desktopControlMode === "precision" || desktopControlMode === "spatial");
+    if (!armed) {
+      // Drop any in-progress window grab before the worker is disarmed.
+      const drop = precisionRef.current.reset();
+      for (const op of drop) sendDesktopInput(op);
+      sendDesktopInput({ op: "release" });
+    }
+    setDesktopInjectArmed(armed);
+    if (armed && window.jarvis?.invoke) {
+      void window.jarvis.invoke("jarvis:virtual-screen").then((b: any) => {
+        if (b && b.width && b.height) {
+          screenRef.current = {
+            x: b.x || 0,
+            y: b.y || 0,
+            width: b.width,
+            height: b.height,
+          };
+        }
+      });
+    }
+    return () => {
+      if (armed) {
+        const drop = precisionRef.current.reset();
+        for (const op of drop) sendDesktopInput(op);
+        sendDesktopInput({ op: "release" });
+        setDesktopInjectArmed(false);
+      }
+    };
+  }, [enabled, desktopControlEnabled, desktopControlMode, desktopPaused]);
 
   function stop() {
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
     rafRef.current = 0;
+    if (hiddenTimerRef.current) {
+      window.clearInterval(hiddenTimerRef.current);
+      hiddenTimerRef.current = 0;
+    }
+    window.jarvis?.send?.("jarvis:hands-active", false);
+    setDesktopInjectArmed(false);
+    sendDesktopInput({ op: "release" });
+    precisionRef.current.reset();
     const video = videoRef.current;
     const stream = video?.srcObject as MediaStream | null;
     stream?.getTracks().forEach((t) => t.stop());
@@ -615,7 +739,7 @@ export default function GestureOverlay() {
           ref={(el) => {
             circleRefs.current[i] = el;
           }}
-          className="hands-cursor fixed top-0 left-0 z-[86] pointer-events-none w-5 h-5 rounded-full opacity-0"
+          className="hands-cursor fixed top-0 left-0 z-[86] pointer-events-none w-3.5 h-3.5 rounded-full opacity-0"
           data-mode="open"
           style={{ willChange: "transform" }}
         />
@@ -632,17 +756,17 @@ export default function GestureOverlay() {
 
       <style>{`
         .hands-cursor {
-          border: 2px solid rgba(34, 211, 238, 0.85);
-          background: rgba(34, 211, 238, 0.12);
-          box-shadow: 0 0 14px rgba(34, 211, 238, 0.45);
+          border: none;
+          background: #3b9eff;
+          box-shadow: 0 0 10px rgba(59, 158, 255, 0.85), 0 0 2px rgba(255,255,255,0.9);
         }
         .hands-cursor[data-mode="pinch"] {
-          border-color: rgba(224, 242, 254, 0.95);
-          background: rgba(224, 242, 254, 0.35);
+          background: #e0f2fe;
+          box-shadow: 0 0 12px rgba(224, 242, 254, 0.95);
         }
         .hands-cursor[data-mode="fist"] {
-          border-color: rgba(252, 211, 77, 0.95);
-          background: rgba(252, 211, 77, 0.28);
+          background: #fbbf24;
+          box-shadow: 0 0 12px rgba(251, 191, 36, 0.9);
         }
       `}</style>
     </>

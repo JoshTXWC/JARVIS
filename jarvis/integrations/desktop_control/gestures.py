@@ -216,12 +216,14 @@ class PrecisionClassifier:
     Tracking loss while dragging → drag_end.
     """
 
-    pinch_threshold: float = 0.05
-    pinch_hold_ms: int = 40
-    click_debounce_ms: int = 180
+    pinch_threshold: float = 0.06
+    pinch_hold_ms: int = 0
+    click_debounce_ms: int = 120
     scroll_threshold: float = 0.018
-    open_palm_freeze_ms: int = 450
-    fist_pause_ms: int = 400
+    # 0 = disabled. Open-palm freeze was firing during normal use and locking
+    # the cursor between pinches — keep opt-in via settings.
+    open_palm_freeze_ms: int = 0
+    fist_pause_ms: int = 900
     drag_promote_px: float = 0.012  # normalized movement to prefer drag over tap
 
     _pinch_since: float | None = None
@@ -234,11 +236,13 @@ class PrecisionClassifier:
     _scroll_anchor_y: float | None = None
     _two_finger_since: float | None = None
     _two_finger_scrolled: bool = False
+    _last_pinch_at: float = 0.0
 
     def __post_init__(self) -> None:
         self._click = ClickDebouncer(self.click_debounce_ms)
-        self._freeze_gate = TemporalGate(self.open_palm_freeze_ms, 800)
-        self._pause_gate = TemporalGate(self.fist_pause_ms, 600)
+        # hold_ms <= 0 disables the gate
+        self._freeze_gate = TemporalGate(max(0, self.open_palm_freeze_ms), 1200)
+        self._pause_gate = TemporalGate(max(0, self.fist_pause_ms), 900)
 
     def reset(self) -> None:
         was = self._dragging
@@ -278,10 +282,21 @@ class PrecisionClassifier:
         meta["pos"] = pos
         meta["pose"] = pose
 
-        if self._pause_gate.update(pose == "fist" and not self._dragging, now_ms):
+        # Don't steal control while the user is mid-pinch or just released.
+        recently_pinching = self._dragging or (now_ms - self._last_pinch_at) < 600
+
+        if (
+            self.fist_pause_ms > 0
+            and not recently_pinching
+            and self._pause_gate.update(pose == "fist" and not self._dragging, now_ms)
+        ):
             return "pause", meta
 
-        if self._freeze_gate.update(pose == "open" and not self._dragging, now_ms):
+        if (
+            self.open_palm_freeze_ms > 0
+            and not recently_pinching
+            and self._freeze_gate.update(pose == "open" and not self._dragging, now_ms)
+        ):
             return "freeze_toggle", meta
 
         # Two-finger: scroll or right-click
@@ -315,6 +330,7 @@ class PrecisionClassifier:
 
         pinching = pose == "pinch"
         if pinching:
+            self._last_pinch_at = now_ms
             if self._pinch_since is None:
                 self._pinch_since = now_ms
             if not self._pinching and (now_ms - self._pinch_since) >= self.pinch_hold_ms:
