@@ -4,6 +4,7 @@ python-multipart>=0.0.9              # /stt route uses UploadFile=File(...); Fas
 uvicorn[standard]>=0.27.0
 websockets>=12.0
 httpx>=0.25.0
+truststore>=0.10.0                # OS certificate store for cloud HTTPS (Windows TLS)
 trafilatura>=2.0.0                # in-app news reader content extraction
 pydantic>=2.5.0
 pyyaml>=6.0.1
@@ -31,6 +32,9 @@ Pillow>=10.0.0                    # image IO
 
 # Browser automation (after pip install run:  playwright install chromium)
 playwright>=1.40.0
+
+# Google Gemini (cloud models + computer-use web agent)
+google-genai>=1.0.0
 
 # GPU stats
 nvidia-ml-py>=12.0.0              # preferred; falls back to nvidia-smi if missing

@@ -1,38 +1,51 @@
 /**
- * SYSTEM DIAGNOSTICS + SUBSYSTEMS — combined liquid panel.
- * Primary rings on top; extended radials below a divider; collapse toggle.
+ * SYSTEM STATUS — resource metrics, subsystem rows, overall health.
  */
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { useStore } from "../../lib/store";
 import { getStats } from "../../lib/api";
-import Ring from "./Ring";
 
-const COLLAPSE_KEY = "jarvis.diag.subsCollapsed";
+type Tone = "ok" | "warn" | "crit" | "off";
 
-interface Gauge {
+interface Metric {
   key: string;
   label: string;
   pct: number;
-  status: "ok" | "warn" | "crit" | "off";
-  sub: string;
+  tone: Tone;
 }
 
-const R = 15.5;
-const C = 2 * Math.PI * R;
+interface Subsystem {
+  key: string;
+  label: string;
+  status: string;
+  tone: Tone;
+}
 
-const TONE = {
-  ok:   { stroke: "rgba(125,211,252,0.95)", glow: "rgba(125,211,252,0.35)", text: "text-jarvis-ok" },
-  warn: { stroke: "rgba(251,191,36,0.95)",  glow: "rgba(251,191,36,0.35)",  text: "text-jarvis-warn" },
-  crit: { stroke: "rgba(251,113,133,0.95)", glow: "rgba(251,113,133,0.40)", text: "text-jarvis-danger" },
-  off:  { stroke: "rgba(186,230,253,0.28)", glow: "transparent",            text: "text-jarvis-ice/40" },
-} as const;
+const TONE_TEXT: Record<Tone, string> = {
+  ok:   "text-jarvis-ok",
+  warn: "text-jarvis-warn",
+  crit: "text-jarvis-danger",
+  off:  "text-jarvis-ice/40",
+};
 
-function loadCollapsed(): boolean {
-  try {
-    return localStorage.getItem(COLLAPSE_KEY) === "1";
-  } catch {
-    return false;
-  }
+const TONE_GLOW: Record<Tone, string> = {
+  ok:   "0 0 10px rgba(74,222,128,0.55)",
+  warn: "0 0 10px rgba(251,191,36,0.55)",
+  crit: "0 0 10px rgba(251,113,133,0.55)",
+  off:  "none",
+};
+
+const TONE_DOT: Record<Tone, string> = {
+  ok:   "bg-jarvis-ok shadow-[0_0_8px_rgba(74,222,128,0.7)]",
+  warn: "bg-jarvis-warn shadow-[0_0_8px_rgba(251,191,36,0.7)]",
+  crit: "bg-jarvis-danger shadow-[0_0_8px_rgba(251,113,133,0.7)]",
+  off:  "bg-jarvis-ice/30",
+};
+
+function sev(pct: number): Tone {
+  if (pct >= 90) return "crit";
+  if (pct >= 70) return "warn";
+  return "ok";
 }
 
 export default function DiagPanel() {
@@ -41,32 +54,37 @@ export default function DiagPanel() {
   const health = useStore((s) => s.health);
   const tools = useStore((s) => s.tools);
   const connected = useStore((s) => s.connected);
-  const [collapsed, setCollapsed] = useState(loadCollapsed);
 
   useEffect(() => {
     let live = true;
+    let id = 0;
     const tick = async () => {
+      if (document.hidden) return; // idle tab — don't hammer /api/stats (GPU counters)
       try {
         const s = await getStats();
         if (live) setStats(s);
       } catch { /* ignore */ }
     };
+    const arm = () => {
+      if (id) window.clearInterval(id);
+      id = window.setInterval(tick, 4000);
+    };
     tick();
-    const id = setInterval(tick, 1500);
-    return () => { live = false; clearInterval(id); };
+    arm();
+    const onVis = () => {
+      if (!document.hidden) void tick();
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      live = false;
+      if (id) window.clearInterval(id);
+      document.removeEventListener("visibilitychange", onVis);
+    };
   }, [setStats]);
-
-  const toggle = () => {
-    setCollapsed((v) => {
-      const next = !v;
-      try { localStorage.setItem(COLLAPSE_KEY, next ? "1" : "0"); } catch { /* noop */ }
-      return next;
-    });
-  };
 
   if (!stats) {
     return (
-      <div className="holo-panel p-3 text-center text-mono text-xs text-jarvis-cyan/50 h-full grid place-items-center">
+      <div className="holo-panel px-3 py-6 text-center text-mono text-xs text-jarvis-cyan/50">
         acquiring telemetry…
       </div>
     );
@@ -74,206 +92,212 @@ export default function DiagPanel() {
 
   const gpuAvailable = !!stats.gpu?.available;
   const gpuLoad = stats.gpu?.load_percent ?? 0;
-  const gauges = buildGauges(stats, health, tools, connected);
+
+  const metrics: Metric[] = [
+    { key: "cpu",  label: "CPU",  pct: stats.cpu,          tone: sev(stats.cpu) },
+    { key: "ram",  label: "RAM",  pct: stats.ram.percent,  tone: sev(stats.ram.percent) },
+    { key: "disk", label: "DISK", pct: stats.disk.percent, tone: sev(stats.disk.percent) },
+    {
+      key: "gpu",
+      label: "GPU",
+      pct: gpuAvailable ? gpuLoad : 0,
+      tone: gpuAvailable ? sev(gpuLoad) : "off",
+    },
+  ];
+
+  const running = tools.filter((t) => t.status === "running").length;
+  const battery = stats.battery;
+  const battPct = battery?.percent ?? 100;
+
+  let powerStatus = "Stable";
+  let powerTone: Tone = "ok";
+  if (battery && !battery.plugged) {
+    if (battPct < 20) { powerStatus = "Critical"; powerTone = "crit"; }
+    else if (battPct < 40) { powerStatus = "Low"; powerTone = "warn"; }
+    else { powerStatus = "Stable"; powerTone = "ok"; }
+  }
+
+  let linkStatus = "Online";
+  let linkTone: Tone = "ok";
+  if (!connected) { linkStatus = "Down"; linkTone = "crit"; }
+  else if (!health) { linkStatus = "Degraded"; linkTone = "warn"; }
+
+  let busStatus = "Online";
+  let busTone: Tone = "ok";
+  if (running > 3) { busStatus = "Busy"; busTone = "warn"; }
+  else if (running > 0) { busStatus = "Active"; busTone = "ok"; }
+
+  const subsystems: Subsystem[] = [
+    {
+      key: "ai",
+      label: "AI",
+      status: health ? "Good" : "Offline",
+      tone: health ? "ok" : "off",
+    },
+    { key: "link", label: "LINK", status: linkStatus, tone: linkTone },
+    { key: "bus", label: "BUS", status: busStatus, tone: busTone },
+    { key: "power", label: "POWER", status: powerStatus, tone: powerTone },
+  ];
+
+  const tones = [...metrics.map((m) => m.tone), ...subsystems.map((s) => s.tone)];
+  const overall: Tone = tones.includes("crit")
+    ? "crit"
+    : tones.includes("warn")
+      ? "warn"
+      : tones.includes("off")
+        ? "warn"
+        : "ok";
+  const overallLabel =
+    overall === "ok" ? "Good" : overall === "warn" ? "Degraded" : "Critical";
 
   return (
-    <div className="holo-panel flex flex-col h-full overflow-hidden">
-      <div className="panel-header flex items-center justify-between px-3.5 py-2 shrink-0">
-        <span className="text-display text-[10px] tracking-[0.35em] text-shimmer font-medium">
-          SYSTEM DIAGNOSTICS
+    <div className="holo-panel flex flex-col w-full overflow-hidden">
+      {/* Header */}
+      <div className="relative z-[2] flex items-center gap-2 px-3 pt-3 pb-2 shrink-0">
+        <PulseIcon />
+        <span className="text-[15px] font-semibold tracking-wide text-white/95">
+          System Status
         </span>
-        <span className="glass-chip">LIVE</span>
       </div>
 
-      <div className="flex-1 min-h-0 overflow-y-auto">
-        {/* Primary rings */}
-        <div className="p-3 space-y-2">
-          <div className="grid grid-cols-4 gap-1 justify-items-center">
-            <Ring value={stats.cpu} label="CPU" sub={`${stats.cpu_count}c`} size={58} />
-            <Ring value={stats.ram.percent} label="RAM" sub={`${stats.ram.used_gb.toFixed(0)}g`} size={58} />
-            <Ring
-              value={stats.disk.percent}
-              label="DISK"
-              sub={`${(stats.disk.total_gb - stats.disk.used_gb).toFixed(0)}g`}
-              size={58}
-            />
-            <Ring
-              value={gpuAvailable ? gpuLoad : 0}
-              label="GPU"
-              sub={gpuAvailable ? `${(stats.gpu?.mem_used_gb ?? 0).toFixed(0)}g` : "n/a"}
-              size={58}
-            />
-          </div>
-
-          <div className="grid grid-cols-3 gap-1.5 text-mono text-[9px]">
-            <Cell k="NET ↑" v={`${stats.net.sent_mb.toFixed(1)} MB`} />
-            <Cell k="NET ↓" v={`${stats.net.recv_mb.toFixed(1)} MB`} />
-            <Cell
-              k={stats.battery ? (stats.battery.plugged ? "POWER" : "BAT") : "HOST"}
-              v={
-                stats.battery
-                  ? `${stats.battery.percent.toFixed(0)}%`
-                  : stats.os.node
-              }
-            />
-          </div>
-        </div>
-
-        {/* Divider + collapse control */}
-        <div className="px-3">
-          <div className="glass-divider" />
-          <button
-            type="button"
-            onClick={toggle}
-            data-reticle
-            title={collapsed ? "Expand subsystems" : "Collapse subsystems"}
-            className="w-full flex items-center justify-between gap-2 py-2 px-1 rounded-lg text-left hover:bg-jarvis-cyan/[0.04] transition-colors"
-          >
-            <span className="flex items-center gap-2 min-w-0">
-              <span className="text-display text-[9px] tracking-[0.35em] text-jarvis-cyan/70">
-                SUBSYSTEMS
+      <div className="relative z-[2] px-3 pb-3 flex flex-col">
+        {/* Resource metrics */}
+        <div className="space-y-2 py-0.5">
+          {metrics.map((m) => (
+            <div key={m.key} className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0"> 
+                <span className="text-[13px] font-medium tracking-[0.06em] text-white/90 uppercase">
+                  {m.label}
+                </span>
+              </div>
+              <span
+                className={`text-[13px] font-semibold tabular-nums ${TONE_TEXT[m.tone]}`}
+                style={{ textShadow: TONE_GLOW[m.tone] }}
+              >
+                {gpuAvailable || m.key !== "gpu" ? `${Math.round(m.pct)}%` : "n/a"}
               </span>
-              <span className="glass-chip !py-0 !px-1.5 text-[9px]">{gauges.length}</span>
-            </span>
-            <span className="text-jarvis-cyan/55 text-[10px] text-mono tracking-wider flex items-center gap-1">
-              {collapsed ? "EXPAND" : "COLLAPSE"}
-              <Chevron open={!collapsed} />
-            </span>
-          </button>
-          {!collapsed && <div className="glass-divider" />}
+            </div>
+          ))}
         </div>
 
-        {/* Extended radials */}
-        {!collapsed && (
-          <div className="px-2.5 pb-3 pt-2">
-            <div className="grid grid-cols-4 gap-x-1 gap-y-2">
-              {gauges.map((g) => (
-                <Radial key={g.key} gauge={g} />
-              ))}
+        <Divider />
+
+        {/* Subsystems — always expanded */}
+        <div className="space-y-2 py-0.5">
+          {subsystems.map((s) => (
+            <div key={s.key} className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5 min-w-0">             
+                <span className="text-[13px] font-medium tracking-[0.06em] text-white/90 uppercase">
+                  {s.label}
+                </span>
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0">
+                <span
+                  className={`text-[13px] font-semibold tabular-nums ${TONE_TEXT[s.tone]}`}
+                  style={{ textShadow: TONE_GLOW[s.tone] }}
+                >
+                  {s.status}
+                </span>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <Divider />
+
+        {/* Overall health */}
+        <div className="flex items-center gap-2.5 pt-0.5">
+          <HealthBadge tone={overall} />
+          <div className="min-w-0">
+            <div className="text-[12px] font-medium text-white/90 leading-tight">
+              System Health
+            </div>
+            <div
+              className={`text-[18px] font-bold leading-tight ${TONE_TEXT[overall]}`}
+              style={{ textShadow: TONE_GLOW[overall] }}
+            >
+              {overallLabel}
             </div>
           </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function buildGauges(
-  stats: NonNullable<ReturnType<typeof useStore.getState>["stats"]>,
-  health: ReturnType<typeof useStore.getState>["health"],
-  tools: ReturnType<typeof useStore.getState>["tools"],
-  connected: boolean,
-): Gauge[] {
-  // Extended strip only — CPU/RAM/DISK/GPU already live in the primary rings.
-  const rows: Gauge[] = [];
-  if (stats.battery) {
-    const bp = stats.battery.percent;
-    rows.push({
-      key: "pwr",
-      label: "PWR",
-      pct: bp,
-      status: bp < 20 ? "crit" : bp < 40 ? "warn" : "ok",
-      sub: stats.battery.plugged ? "AC" : "BAT",
-    });
-  } else {
-    rows.push({ key: "pwr", label: "PWR", pct: 100, status: "ok", sub: "AC" });
-  }
-  rows.push({
-    key: "lnk",
-    label: "LINK",
-    pct: connected ? 100 : 0,
-    status: connected ? "ok" : "crit",
-    sub: connected ? "UP" : "DN",
-  });
-  rows.push({
-    key: "ai",
-    label: "AI",
-    pct: health ? 100 : 0,
-    status: health ? "ok" : "off",
-    sub: health ? "ON" : "OFF",
-  });
-  const running = tools.filter((t) => t.status === "running").length;
-  rows.push({
-    key: "tools",
-    label: "BUS",
-    pct: Math.min(100, 30 + running * 18),
-    status: running > 3 ? "warn" : "ok",
-    sub: `${running}a`,
-  });
-  return rows;
-}
-
-function Cell({ k, v }: { k: string; v: string }) {
-  return (
-    <div
-      className="rounded-lg px-2 py-1.5 min-w-0"
-      style={{
-        background: "rgba(8,14,26,0.35)",
-        boxShadow: "inset 0 0 0 1px rgba(125,211,252,0.10)",
-      }}
-    >
-      <div className="text-jarvis-cyan/40 tracking-wider truncate">{k}</div>
-      <div className="text-jarvis-cyan/90 truncate tabular-nums">{v}</div>
-    </div>
-  );
-}
-
-function Radial({ gauge }: { gauge: Gauge }) {
-  const tone = TONE[gauge.status];
-  const pct = Math.max(0, Math.min(100, gauge.pct));
-  const dash = (pct / 100) * C;
-
-  return (
-    <div
-      className="flex flex-col items-center gap-0.5 min-w-0"
-      title={`${gauge.label} · ${gauge.sub}`}
-      data-reticle
-    >
-      <div className="relative w-[52px] h-[52px]">
-        <svg viewBox="0 0 40 40" className="w-full h-full -rotate-90">
-          <circle cx="20" cy="20" r={R} fill="none" stroke="rgba(186,230,253,0.08)" strokeWidth="3" />
-          <circle
-            cx="20"
-            cy="20"
-            r={R}
-            fill="none"
-            stroke={tone.stroke}
-            strokeWidth="3"
-            strokeLinecap="round"
-            strokeDasharray={`${dash} ${C}`}
-            style={{
-              filter: tone.glow !== "transparent" ? `drop-shadow(0 0 4px ${tone.glow})` : undefined,
-              transition: "stroke-dasharray 0.4s ease",
-            }}
-          />
-        </svg>
-        <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
-          <span className={`text-mono text-[11px] tabular-nums leading-none font-medium ${tone.text}`}>
-            {pct.toFixed(0)}
-          </span>
-          <span className="text-mono text-[7px] text-jarvis-ice/35 leading-none mt-0.5">%</span>
         </div>
       </div>
-      <span className="text-mono text-[8px] tracking-[0.18em] text-jarvis-ice/70 truncate max-w-full">
-        {gauge.label}
-      </span>
-      <span className="text-mono text-[7px] tracking-wider text-jarvis-ice/35 truncate max-w-full uppercase">
-        {gauge.sub}
-      </span>
     </div>
   );
 }
 
-function Chevron({ open }: { open: boolean }) {
+function Divider() {
   return (
-    <svg
-      width="10"
-      height="10"
-      viewBox="0 0 10 10"
-      fill="none"
-      className={`transition-transform duration-200 ${open ? "rotate-180" : ""}`}
-    >
-      <path d="M2 3.5L5 6.5L8 3.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+    <div
+      className="my-2.5 h-px w-full shrink-0"
+      style={{
+        background:
+          "linear-gradient(90deg, transparent, rgba(186,230,253,0.22) 20%, rgba(186,230,253,0.22) 80%, transparent)",
+      }}
+    />
+  );
+}
+
+function Diamond() {
+  return (
+    <span
+      className="inline-block w-1.5 h-1.5 rotate-45 shrink-0"
+      style={{
+        background: "rgba(125,211,252,0.95)",
+        boxShadow: "0 0 6px rgba(125,211,252,0.7)",
+      }}
+    />
+  );
+}
+
+function Chevron() {
+  return (
+    <svg width="8" height="10" viewBox="0 0 8 10" className="text-jarvis-cyan/55 shrink-0" aria-hidden>
+      <path d="M2 1.5L5.5 5L2 8.5" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
+  );
+}
+
+function PulseIcon() {
+  return (
+    <svg width="18" height="14" viewBox="0 0 18 14" className="text-jarvis-cyan shrink-0" aria-hidden
+      style={{ filter: "drop-shadow(0 0 4px rgba(125,211,252,0.7))" }}>
+      <path
+        d="M1 7h3l1.5-3.5L8 11l2-7 1.5 3.5H17"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function HealthBadge({ tone }: { tone: Tone }) {
+  const stroke =
+    tone === "ok" ? "#4ade80" : tone === "warn" ? "#fbbf24" : "#fb7185";
+  return (
+    <div
+      className="relative w-9 h-9 rounded-full grid place-items-center shrink-0"
+      style={{
+        background: "rgba(125,211,252,0.08)",
+        boxShadow: `0 0 0 1.5px rgba(125,211,252,0.45), 0 0 16px rgba(125,211,252,0.25)`,
+      }}
+    >
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden
+        style={{ filter: `drop-shadow(0 0 4px ${stroke})` }}>
+        <path
+          d="M12 3l7 3v5.5c0 4.5-3 7.8-7 9-4-1.2-7-4.5-7-9V6l7-3z"
+          stroke="rgba(125,211,252,0.95)"
+          strokeWidth="1.6"
+          fill="rgba(125,211,252,0.06)"
+        />
+        {tone === "crit" ? (
+          <path d="M12 8v5M12 15.5v.5" stroke={stroke} strokeWidth="2" strokeLinecap="round" />
+        ) : (
+          <path d="M8.5 12.2l2.2 2.3 4.8-5" stroke={stroke} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+        )}
+      </svg>
+    </div>
   );
 }

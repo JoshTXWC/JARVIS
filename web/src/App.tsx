@@ -4,17 +4,17 @@ import BootSequence from "./components/Boot/BootSequence";
 import ChatPanel from "./components/Chat/ChatPanel";
 import CommandBar from "./components/Chat/CommandBar";
 import DropZone from "./components/Chat/DropZone";
-import TerminalPanel from "./components/HUD/TerminalPanel";
 import CornerFrame from "./components/HUD/CornerFrame";
 import DiagPanel from "./components/HUD/DiagPanel";
 import Floating, { resetAllLayouts } from "./components/HUD/Floating";
-import MissionLog from "./components/HUD/MissionLog";
 import PlanPanel from "./components/HUD/PlanPanel";
 import Reticle from "./components/HUD/Reticle";
 import Settings from "./components/HUD/Settings";
 import SwarmPanel from "./components/HUD/SwarmPanel";
 import TopBar from "./components/HUD/TopBar";
 import BarehandsOverlay from "./components/HUD/BarehandsOverlay";
+import GestureOverlay from "./components/HUD/GestureOverlay";
+import SystemLog from "./components/HUD/SystemLog";
 import UptimePanel from "./components/HUD/UptimePanel";
 import MediaHub from "./components/Media/MediaHub";
 import Orb from "./components/Orb/Orb";
@@ -27,6 +27,7 @@ import ToolFeed from "./components/Tools/ToolFeed";
 // ArticleReader).
 const Lightbox      = lazy(() => import("./components/Media/Lightbox"));
 const ArticleReader = lazy(() => import("./components/Media/ArticleReader"));
+const NeuralCloudBackground = lazy(() => import("./components/Media/NeuralCloudBackground"));
 import { getHealth } from "./lib/api";
 import { useStore, nextId, type MediaKind } from "./lib/store";
 import { refreshVoiceProfile, streamSpeak } from "./lib/voice";
@@ -45,22 +46,25 @@ function defaults() {
   const M = 8;
   const TOP = 66;
   const BOTTOM = 46;
-  const colL = 320;
-  const colR = 380;
-  const halfH = (H - TOP - BOTTOM - 8) / 2;
+  const dialogueW = Math.min(720, Math.max(420, Math.floor(W * 0.42)));
+  const dialogueH = Math.min(H - TOP - BOTTOM - 24, Math.floor(H * 0.72));
   return {
-    diag:      { x: M, y: TOP, w: colL, h: 420 },
-    terminal:  { x: M, y: TOP + 428, w: colL, h: Math.max(180, H - TOP - 428 - BOTTOM) },
-    uptime:    { x: M + colL + 12, y: TOP, w: 220, h: 136 },
-    chat:      { x: W - colR - M, y: TOP, w: colR, h: halfH * 2 - 200 },
-    mission:   { x: W - colR - M, y: H - BOTTOM - 200 - 8 - 110, w: colR, h: 110 },
-    toolFeed:  { x: W - colR - M, y: H - BOTTOM - 200, w: colR, h: 200 },
+    // Fused chat + command bar — the only panel open by default.
+    dialogue:  {
+      x: W - dialogueW - M,
+      y: TOP + 8,
+      w: dialogueW,
+      h: dialogueH,
+    },
+    diag:      { x: M, y: TOP, w: 196, h: 360 },
+    terminal:  { x: M, y: TOP + 380, w: 320, h: Math.max(180, H - TOP - 380 - BOTTOM) },
+    uptime:    { x: M + 212, y: TOP, w: 200, h: 136 },
+    mission:   { x: M, y: H - BOTTOM - 120, w: 320, h: 110 },
+    toolFeed:  { x: M, y: H - BOTTOM - 220, w: 320, h: 200 },
 
-    // Media hubs — each kind in its own panel. Initial positions cascade
-    // diagonally so they don't all stack at one spot; user can drag.
     swarm:       { x: 340,  y: 80,  w: 360, h: 320 },
     plan:        { x: 340,  y: 80,  w: 360, h: 300 },
-    settings:    { x: 380,  y: 100, w: 440, h: 580 },
+    settings:    { x: Math.max(M, (W - 420) / 2), y: TOP + 40, w: 420, h: Math.min(640, H - TOP - BOTTOM - 48) },
     reader:      { x: 480,  y: 140, w: 720, h: 640 },
     images:      { x: 380,  y: 120, w: 640, h: 480 },
     videos:      { x: 420,  y: 160, w: 680, h: 460 },
@@ -71,8 +75,6 @@ function defaults() {
     webcam:      { x: 620,  y: 360, w: 520, h: 420 },
     memory:      { x: 660,  y: 400, w: 600, h: 520 },
     model3d:     { x: 700,  y: 200, w: 560, h: 520 },
-
-    cmd:       { x: (W - 860) / 2, y: H - BOTTOM - 118, w: 860, h: 96 },
   };
 }
 
@@ -181,6 +183,8 @@ export default function App() {
     return useStore.subscribe((state) => {
       const last = state.chat[state.chat.length - 1];
       if (!last || last.role !== "assistant") return;
+      // Never speak transport / brain errors (they belong in TERM only).
+      if (last.text.trimStart().startsWith("[brain error]")) return;
       if (last.id !== lastId) {
         lastId = last.id;
         lastLen = 0;
@@ -225,7 +229,14 @@ export default function App() {
   const setLayoutEdit = useStore((s) => s.setLayoutEdit);
   const dockedPanels = useStore((s) => s.dockedPanels);
   const clearDockedPanels = useStore((s) => s.clearDockedPanels);
+  const backgroundMode = useStore((s) => s.backgroundMode);
+  const barehandsOpen = useStore((s) => s.barehandsOpen);
+  const barehandsEmbed = useStore((s) => s.barehandsEmbed);
+  const gestureEnabled = useStore((s) => s.gestureEnabled);
   const visible = (id: string) => !dockedPanels.includes(id);
+  // Neural can run together with Hands (finger cursor drives the cloud).
+  const showNeuralBg =
+    backgroundMode === "neural" && !(barehandsOpen && !barehandsEmbed);
 
   // Helper: which hubs have at least 1 item?
   const has = (kinds: MediaKind[]) => media.some((m) => kinds.includes(m.kind));
@@ -233,25 +244,32 @@ export default function App() {
   if (viewport.w < 900) {
     return (
       <div className="relative w-screen h-screen overflow-hidden">
-        <Atmosphere />
+        {!gestureEnabled && !showNeuralBg && <Atmosphere />}
+        {showNeuralBg && (
+          <Suspense fallback={null}>
+            <NeuralCloudBackground />
+          </Suspense>
+        )}
         <Orb />
         <CornerFrame />
         <TopBar />
 
-        <div className="fixed left-2 right-2 top-[74px] z-20 grid h-[136px] grid-cols-[minmax(0,1fr)_minmax(168px,190px)] gap-3 pointer-events-auto">
-          <div className="min-w-0 overflow-hidden">
-            <DiagPanel />
+        <div className="fixed left-3 right-3 top-[74px] bottom-4 z-20 pointer-events-auto flex flex-col min-h-0 rounded-xl overflow-hidden"
+          style={{ boxShadow: "0 0 0 1px rgba(125,211,252,0.18), 0 24px 60px -20px rgba(0,0,0,0.65)" }}
+        >
+          <div className="flex-1 min-h-0 holo-panel rounded-none border-0">
+            <ChatPanel embedded />
           </div>
-          <UptimePanel />
+          <div className="shrink-0 border-t border-jarvis-cyan/15 holo-panel rounded-none border-0">
+            <CommandBar embedded />
+          </div>
         </div>
 
-        <div className="fixed left-4 right-4 top-[224px] bottom-[136px] z-20 min-h-[260px] pointer-events-auto">
-          <ChatPanel />
-        </div>
-
-        <div className="fixed left-4 right-4 bottom-16 z-30 h-[72px] pointer-events-auto">
-          <CommandBar />
-        </div>
+        {visible("settings") && (
+          <div className="fixed inset-3 top-[74px] z-40 pointer-events-auto">
+            <Settings />
+          </div>
+        )}
 
         <Reticle />
         <Suspense fallback={null}>
@@ -262,13 +280,19 @@ export default function App() {
         <DropZone />
         <BootSequence />
         <BarehandsOverlay />
+        <GestureOverlay />
       </div>
     );
   }
 
   return (
     <div className="relative w-screen h-screen overflow-hidden">
-      <Atmosphere />
+      {!gestureEnabled && !showNeuralBg && <Atmosphere />}
+      {showNeuralBg && (
+        <Suspense fallback={null}>
+          <NeuralCloudBackground />
+        </Suspense>
+      )}
       <Orb />
 
       {/* Fixed HUD chrome — not draggable */}
@@ -320,98 +344,100 @@ export default function App() {
         </div>
       )}
 
-      {/* Floating, movable + resizable panels */}
+      {/* Dialogue = chat + command bar fused. Always on canvas. */}
+      <Floating id="dialogue" defaultBox={D.dialogue} minW={380} minH={420} z={26} overflowVisible>
+        <div className="holo-panel flex flex-col h-full overflow-visible">
+          <div className="flex-1 min-h-0 overflow-hidden">
+            <ChatPanel embedded />
+          </div>
+          <div className="shrink-0 border-t border-jarvis-cyan/15 overflow-visible">
+            <CommandBar embedded />
+          </div>
+        </div>
+      </Floating>
+
+      {/* Optional tiles — start docked; open from the top icon dock */}
       {visible("diag") && (
-        <Floating id="diag" defaultBox={D.diag} minW={260} minH={160}><DiagPanel /></Floating>
+        <Floating id="diag" defaultBox={D.diag} autoHeight fixedWidth={196} noResize>
+          <DiagPanel />
+        </Floating>
       )}
       {visible("uptime") && (
-        <Floating id="uptime" defaultBox={D.uptime} minW={180} minH={118}><UptimePanel /></Floating>
-      )}
-      {visible("terminal") && (
-        <Floating id="terminal" defaultBox={D.terminal} minW={260} minH={180}><TerminalPanel /></Floating>
-      )}
-
-      {visible("chat") && (
-        <Floating id="chat" defaultBox={D.chat} minW={300} minH={260}><ChatPanel /></Floating>
-      )}
-      {visible("mission") && (
-        <Floating id="mission" defaultBox={D.mission} minW={280} minH={90}><MissionLog /></Floating>
+        <Floating id="uptime" defaultBox={D.uptime} autoHeight fixedWidth={200} noResize>
+          <UptimePanel />
+        </Floating>
       )}
       {visible("toolFeed") && (
         <Floating id="toolFeed" defaultBox={D.toolFeed} minW={280} minH={140}><ToolFeed /></Floating>
       )}
-      {hasSwarms && visible("swarm") && (
+      {visible("terminal") && (
+        <Floating id="terminal" defaultBox={D.terminal} minW={300} minH={180} z={25}>
+          <SystemLog />
+        </Floating>
+      )}
+      {hasSwarms && (
         <Floating id="swarm" defaultBox={D.swarm} minW={300} minH={200} z={23}>
           <SwarmPanel />
         </Floating>
       )}
-      {hasPlan && visible("plan") && (
+      {hasPlan && (
         <Floating id="plan" defaultBox={D.plan} minW={300} minH={180} z={24}>
           <PlanPanel />
         </Floating>
       )}
       {visible("settings") && (
-        <Floating id="settings" defaultBox={D.settings} minW={340} minH={300} z={28}>
+        <Floating id="settings" defaultBox={D.settings} minW={360} minH={420} z={28}>
           <Settings />
         </Floating>
       )}
-      {/* Pinned reader — when readerPinned=true the ArticleReader component
-          renders only the inner article surface, so we wrap it in a
-          Floating panel here. Modal mode (unpinned) is mounted directly
-          below as fullscreen overlay. */}
       <PinnedReader defaultBox={D.reader} />
 
-      {/* ── Per-kind media hubs. Each only renders when has items. ── */}
-      {has(["image"]) && visible("hub.images") && (
+      {/* Media hubs — appear only when they have content */}
+      {has(["image"]) && (
         <Floating id="hub.images" defaultBox={D.images} minW={360} minH={260} z={22}>
           <MediaHub kinds={["image"]} title="IMAGE GEN" accent="#a5f3fc" />
         </Floating>
       )}
-      {has(["video", "videos"]) && visible("hub.videos") && (
+      {has(["video", "videos"]) && (
         <Floating id="hub.videos" defaultBox={D.videos} minW={360} minH={280} z={22}>
           <MediaHub kinds={["video", "videos"]} title="VIDEOS" accent="#fbbf24" />
         </Floating>
       )}
-      {has(["search"]) && visible("hub.websearch") && (
+      {has(["search"]) && (
         <Floating id="hub.websearch" defaultBox={D.websearch} minW={340} minH={260} z={22}>
           <MediaHub kinds={["search"]} title="WEB SEARCH" accent="#7dd3fc" />
         </Floating>
       )}
-      {has(["news"]) && visible("hub.news") && (
+      {has(["news"]) && (
         <Floating id="hub.news" defaultBox={D.news} minW={340} minH={260} z={22}>
           <MediaHub kinds={["news"]} title="NEWS" accent="#fca5a5" />
         </Floating>
       )}
-      {has(["images"]) && visible("hub.imagesearch") && (
+      {has(["images"]) && (
         <Floating id="hub.imagesearch" defaultBox={D.imagesearch} minW={360} minH={280} z={22}>
           <MediaHub kinds={["images"]} title="IMAGE SEARCH" accent="#7dd3fc" />
         </Floating>
       )}
-      {has(["page", "pdf"]) && visible("hub.pages") && (
+      {has(["page", "pdf"]) && (
         <Floating id="hub.pages" defaultBox={D.pages} minW={400} minH={320} z={22}>
           <MediaHub kinds={["page", "pdf"]} title="PAGES" accent="#bae6fd" />
         </Floating>
       )}
-      {has(["webcam"]) && visible("hub.webcam") && (
+      {has(["webcam"]) && (
         <Floating id="hub.webcam" defaultBox={D.webcam} minW={340} minH={260} z={22}>
           <MediaHub kinds={["webcam"]} title="CAMERA" accent="#fb7185" />
         </Floating>
       )}
-      {has(["galaxy"]) && visible("hub.memory") && (
+      {has(["galaxy"]) && backgroundMode !== "neural" && (
         <Floating id="hub.memory" defaultBox={D.memory} minW={380} minH={320} z={22}>
           <MediaHub kinds={["galaxy"]} title="MEMORY" accent="#a78bfa" />
         </Floating>
       )}
-      {has(["model3d"]) && visible("hub.model3d") && (
+      {has(["model3d"]) && (
         <Floating id="hub.model3d" defaultBox={D.model3d} minW={360} minH={320} z={22}>
           <MediaHub kinds={["model3d"]} title="3D MODELS" accent="#bae6fd" />
         </Floating>
       )}
-
-      {/* Command bar — always present; not removable */}
-      <Floating id="cmd" defaultBox={D.cmd} minW={520} minH={88} autoHeight removable={false} overflowVisible>
-        <CommandBar />
-      </Floating>
 
       <Reticle />
       <Suspense fallback={null}>
@@ -422,6 +448,7 @@ export default function App() {
       <DropZone />
       <BootSequence />
       <BarehandsOverlay />
+      <GestureOverlay />
     </div>
   );
 }

@@ -264,6 +264,109 @@ CATALOG: list[dict[str, Any]] = [
         "summary": "Smaller Grok cloud option when you want lower cost / latency.",
         "intel": 6,
     },
+    # ── Cloud (Google Gemini) — OpenAI-compatible route; needs GEMINI_API_KEY ─
+    # Note (2026): gemini-2.5-* is blocked for many new API keys ("no longer
+    # available to new users"). Prefer 3.x / *-latest ids from the live catalog.
+    {
+        "id": "gemini-3.1-flash-lite",
+        "label": "Gemini 3.1 Flash-Lite",
+        "skill": "tools",
+        "skill_label": "Cloud · fast",
+        "vram_gb": 0,
+        "ram_gb": 0,
+        "tier": "cloud",
+        "cloud": True,
+        "provider_label": "Google",
+        "endpoint": "https://generativelanguage.googleapis.com/v1beta/openai",
+        "api_key_env": "GEMINI_API_KEY",
+        "best_for": ["everyday cloud use", "tool calls", "when local GPU is weak"],
+        "needs": "Cloud · Gemini API key (GEMINI_API_KEY in .env) · https://aistudio.google.com/app/apikey",
+        "pull": None,
+        "tool_calling": "excellent",
+        "recommended": True,
+        "summary": "Google Gemini 3.1 Flash-Lite — reliable cloud daily driver for JARVIS.",
+        "intel": 9,
+    },
+    {
+        "id": "gemini-flash-lite-latest",
+        "label": "Gemini Flash-Lite Latest",
+        "skill": "balanced",
+        "skill_label": "Cloud · light",
+        "vram_gb": 0,
+        "ram_gb": 0,
+        "tier": "cloud",
+        "cloud": True,
+        "provider_label": "Google",
+        "endpoint": "https://generativelanguage.googleapis.com/v1beta/openai",
+        "api_key_env": "GEMINI_API_KEY",
+        "best_for": ["cheaper cloud calls", "quick answers"],
+        "needs": "Cloud · Gemini API key (GEMINI_API_KEY in .env) · https://aistudio.google.com/app/apikey",
+        "pull": None,
+        "tool_calling": "good",
+        "recommended": True,
+        "summary": "Always-current Gemini Flash-Lite pointer from Google.",
+        "intel": 8,
+    },
+    {
+        "id": "gemini-3.5-flash",
+        "label": "Gemini 3.5 Flash",
+        "skill": "tools",
+        "skill_label": "Cloud · fast",
+        "vram_gb": 0,
+        "ram_gb": 0,
+        "tier": "cloud",
+        "cloud": True,
+        "provider_label": "Google",
+        "endpoint": "https://generativelanguage.googleapis.com/v1beta/openai",
+        "api_key_env": "GEMINI_API_KEY",
+        "best_for": ["everyday cloud use", "tool calls"],
+        "needs": "Cloud · Gemini API key (GEMINI_API_KEY in .env) · https://aistudio.google.com/app/apikey",
+        "pull": None,
+        "tool_calling": "excellent",
+        "recommended": True,
+        "summary": "Google Gemini 3.5 Flash — strong general cloud model.",
+        "intel": 10,
+    },
+    {
+        "id": "gemini-pro-latest",
+        "label": "Gemini Pro Latest",
+        "skill": "reasoning",
+        "skill_label": "Cloud · flagship",
+        "vram_gb": 0,
+        "ram_gb": 0,
+        "tier": "cloud",
+        "cloud": True,
+        "provider_label": "Google",
+        "endpoint": "https://generativelanguage.googleapis.com/v1beta/openai",
+        "api_key_env": "GEMINI_API_KEY",
+        "best_for": ["hard questions", "planning", "deep tool workflows"],
+        "needs": "Cloud · Gemini API key (GEMINI_API_KEY in .env) · https://aistudio.google.com/app/apikey",
+        "pull": None,
+        "tool_calling": "excellent",
+        "recommended": True,
+        "summary": "Always-current Gemini Pro pointer — use when Flash is not enough.",
+        "intel": 12,
+    },
+    {
+        "id": "gemini-flash-latest",
+        "label": "Gemini Flash Latest",
+        "skill": "tools",
+        "skill_label": "Cloud · fast",
+        "vram_gb": 0,
+        "ram_gb": 0,
+        "tier": "cloud",
+        "cloud": True,
+        "provider_label": "Google",
+        "endpoint": "https://generativelanguage.googleapis.com/v1beta/openai",
+        "api_key_env": "GEMINI_API_KEY",
+        "best_for": ["everyday cloud use", "when 3.x ids shift"],
+        "needs": "Cloud · Gemini API key (GEMINI_API_KEY in .env) · https://aistudio.google.com/app/apikey",
+        "pull": None,
+        "tool_calling": "excellent",
+        "recommended": False,
+        "summary": "Always-current Gemini Flash pointer from Google.",
+        "intel": 9,
+    },
 ]
 
 # Default local route restored when leaving a cloud model.
@@ -685,7 +788,12 @@ def enrich_catalog(
         if is_cloud:
             key_ok = cloud_key_configured(entry)
             fit = "fits"
-            fit_label = "Cloud · no local GPU needed" if key_ok else "Needs XAI_API_KEY"
+            env_name = entry.get("api_key_env") or "API_KEY"
+            fit_label = (
+                "Cloud · no local GPU needed"
+                if key_ok
+                else f"Needs {env_name}"
+            )
             installed_flag = key_ok
         else:
             fit = "fits" if is_auto else fit_for_vram(float(entry["vram_gb"]), gpu_total_gb)

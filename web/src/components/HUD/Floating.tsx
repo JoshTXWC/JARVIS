@@ -1,7 +1,7 @@
 /**
  * FLOATING — draggable + resizable panel wrapper.
- * Drag the top strip. Release in the top icon-dock zone to animate the
- * tile back into the centered menu (dockable panels only).
+ * Press-and-drag anywhere that isn't a control (or use the top handle).
+ * Release over the top icon dock to put the tile back in the menu.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -25,7 +25,12 @@ interface Props {
   children: React.ReactNode;
   locked?: boolean;
   z?: number;
+  /** Size height to content; hides the resize handle. */
   autoHeight?: boolean;
+  /** Lock width (number or defaultBox.w) and hide resize. Kept across reloads. */
+  fixedWidth?: number | true;
+  /** Hide resize handle without changing drag. */
+  noResize?: boolean;
   /** @deprecated — tiles no longer show X; docking replaces removal */
   removable?: boolean;
   overflowVisible?: boolean;
@@ -33,6 +38,17 @@ interface Props {
 
 const STORAGE_PREFIX = "jarvis.floating.v2.";
 const ANCHOR_PX = 96;
+const DRAG_THRESHOLD_PX = 6;
+/** Press-drag / double-click grab ignores these — real controls keep their clicks. */
+const NO_GRAB_SEL =
+  'button, a, input, textarea, select, label, [role="button"], [data-no-drag], [contenteditable="true"], .soft-field';
+
+function setDraggingFlag(on: boolean) {
+  try {
+    if (on) document.body.dataset.jarvisDragging = "1";
+    else delete document.body.dataset.jarvisDragging;
+  } catch { /* noop */ }
+}
 
 function loadStoredBox(id: string): SavedBox | null {
   try {
@@ -139,9 +155,18 @@ export default function Floating({
   locked = false,
   z = 20,
   autoHeight = false,
+  fixedWidth,
+  noResize = false,
   overflowVisible = false,
 }: Props) {
-  const [saved, setSaved] = useState<SavedBox>(() => loadBox(id, defaultBox));
+  const lockedW = fixedWidth === true ? defaultBox.w : typeof fixedWidth === "number" ? fixedWidth : null;
+  const resizeEnabled = !locked && !autoHeight && !noResize && lockedW == null;
+
+  const [saved, setSaved] = useState<SavedBox>(() => {
+    const box = loadBox(id, defaultBox);
+    if (lockedW != null) return { ...box, w: lockedW };
+    return box;
+  });
   const [vp, setVp] = useState(() => ({
     w: typeof window !== "undefined" ? window.innerWidth : 1600,
     h: typeof window !== "undefined" ? window.innerHeight : 900,
@@ -150,8 +175,11 @@ export default function Floating({
   const [focused, setFocused] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [docking, setDocking] = useState(false);
+  /** Sticky grab from double-click — tile follows pointer until click/Esc. */
+  const [carrying, setCarrying] = useState(false);
   const dragRef = useRef<{ startX: number; startY: number; orig: Box } | null>(null);
   const resizeRef = useRef<{ startX: number; startY: number; orig: Box } | null>(null);
+  const carryRef = useRef<{ offsetX: number; offsetY: number } | null>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
 
@@ -159,6 +187,13 @@ export default function Floating({
   const dockPanel = useStore((s) => s.dockPanel);
   const setDockHot = useStore((s) => s.setDockHot);
   const canDock = isDockable(id);
+
+  // Keep locked width sticky (overrides stale localStorage sizes).
+  useEffect(() => {
+    if (lockedW == null) return;
+    setSaved((b) => (b.w === lockedW ? b : { ...b, w: lockedW }));
+    setTransient((t) => (t && t.w !== lockedW ? { ...t, w: lockedW } : t));
+  }, [lockedW]);
 
   useEffect(() => {
     let raf = 0;
@@ -210,9 +245,10 @@ export default function Floating({
   }, [id, saved]);
 
   const display = useMemo(() => {
-    if (transient) return transient;
-    return computeDisplay(saved, vp.w, vp.h);
-  }, [saved, vp, transient]);
+    const base = transient ?? computeDisplay(saved, vp.w, vp.h);
+    if (lockedW == null) return base;
+    return { ...base, w: lockedW };
+  }, [saved, vp, transient, lockedW]);
 
   useEffect(() => {
     updateSlot(id, display);
@@ -246,48 +282,118 @@ export default function Floating({
     }
   }, [canDock, docking, display, finishDock, setDockHot]);
 
-  const onDragStart = useCallback((e: React.PointerEvent) => {
-    if (locked || docking) return;
-    const t = e.target as HTMLElement | null;
-    if (t?.closest("button, a, input, textarea, select, [data-no-drag]")) return;
-    e.stopPropagation();
-    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-    dragRef.current = { startX: e.clientX, startY: e.clientY, orig: { ...display } };
-    setTransient({ ...display });
-    setFocused(true);
-    setDragging(true);
-  }, [locked, docking, display]);
-
-  const onDragMove = useCallback((e: React.PointerEvent) => {
-    if (!dragRef.current) return;
-    const dx = e.clientX - dragRef.current.startX;
-    const dy = e.clientY - dragRef.current.startY;
-    // Allow free drag into the dock zone (don't clamp Y while dragging up).
-    const next = {
-      ...dragRef.current.orig,
-      x: dragRef.current.orig.x + dx,
-      y: dragRef.current.orig.y + dy,
+  // Unified Hands — fist drag + two-hand scale + dock-on-release.
+  useEffect(() => {
+    const onMove = (e: Event) => {
+      const detail = (e as CustomEvent).detail as {
+        id?: string;
+        dx?: number;
+        dy?: number;
+        x?: number;
+        y?: number;
+      };
+      if (!detail || detail.id !== id) return;
+      if (locked || docking) return;
+      const dx = detail.dx || 0;
+      const dy = detail.dy || 0;
+      setFocused(true);
+      setDragging(true);
+      setTransient((cur) => {
+        const base = cur ?? display;
+        return clampBox({ ...base, x: base.x + dx, y: base.y + dy });
+      });
+      if (canDock && typeof detail.x === "number" && typeof detail.y === "number") {
+        setDockHot(inDockZone(detail.y, detail.x));
+      }
     };
-    const hot = canDock && inDockZone(e.clientY);
+    const onScale = (e: Event) => {
+      const detail = (e as CustomEvent).detail as {
+        id?: string;
+        factor?: number;
+        baseW?: number;
+        baseH?: number;
+      };
+      if (!detail || detail.id !== id) return;
+      if (locked || docking || noResize || autoHeight || lockedW != null) return;
+      const factor = detail.factor ?? 1;
+      const baseW = detail.baseW ?? display.w;
+      const baseH = detail.baseH ?? display.h;
+      setFocused(true);
+      setDragging(true);
+      setTransient((cur) => {
+        const base = cur ?? display;
+        const cx = base.x + base.w / 2;
+        const cy = base.y + base.h / 2;
+        const nw = Math.max(minW, baseW * factor);
+        const nh = Math.max(minH, baseH * factor);
+        return clampBox({ x: cx - nw / 2, y: cy - nh / 2, w: nw, h: nh });
+      });
+    };
+    const onRelease = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { id?: string; x?: number; y?: number };
+      if (!detail || detail.id !== id) return;
+      setDragging(false);
+      if (
+        canDock &&
+        typeof detail.x === "number" &&
+        typeof detail.y === "number" &&
+        inDockZone(detail.y, detail.x)
+      ) {
+        useStore.getState().armDockDropLock(800);
+        startDockAnimation();
+        return;
+      }
+      setDockHot(false);
+      setTransient((t) => {
+        if (t) {
+          const next = clampBox(t);
+          setSaved({ ...next, vw: window.innerWidth, vh: window.innerHeight });
+        }
+        return null;
+      });
+    };
+    window.addEventListener("jarvis:gesture-move", onMove);
+    window.addEventListener("jarvis:gesture-scale", onScale);
+    window.addEventListener("jarvis:gesture-release", onRelease);
+    return () => {
+      window.removeEventListener("jarvis:gesture-move", onMove);
+      window.removeEventListener("jarvis:gesture-scale", onScale);
+      window.removeEventListener("jarvis:gesture-release", onRelease);
+    };
+  }, [
+    id,
+    locked,
+    docking,
+    display,
+    noResize,
+    autoHeight,
+    lockedW,
+    minW,
+    minH,
+    canDock,
+    setDockHot,
+    startDockAnimation,
+  ]);
+
+  const applyDragPosition = useCallback((clientX: number, clientY: number, orig: Box, startX: number, startY: number) => {
+    const next = {
+      ...orig,
+      x: orig.x + (clientX - startX),
+      y: orig.y + (clientY - startY),
+    };
+    const hot = canDock && inDockZone(clientY, clientX);
     setDockHot(hot);
-    if (hot) {
-      setTransient(next);
-    } else {
-      setTransient(clampBox(next));
-    }
+    setTransient(hot ? next : clampBox(next));
   }, [canDock, setDockHot]);
 
-  const onDragEnd = useCallback((e: React.PointerEvent) => {
-    if (!dragRef.current) return;
-    (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
-    dragRef.current = null;
+  const commitDrag = useCallback((clientX: number, clientY: number) => {
     setDragging(false);
-
-    if (canDock && inDockZone(e.clientY)) {
+    setDraggingFlag(false);
+    dragRef.current = null;
+    if (canDock && inDockZone(clientY, clientX)) {
       startDockAnimation();
       return;
     }
-
     setDockHot(false);
     setTransient((t) => {
       if (t) {
@@ -298,14 +404,213 @@ export default function Floating({
     });
   }, [canDock, setDockHot, startDockAnimation]);
 
+  const dropCarry = useCallback((clientX?: number, clientY?: number) => {
+    carryRef.current = null;
+    setCarrying(false);
+    setDragging(false);
+    setDraggingFlag(false);
+    if (
+      canDock &&
+      typeof clientX === "number" &&
+      typeof clientY === "number" &&
+      inDockZone(clientY, clientX)
+    ) {
+      startDockAnimation();
+      return;
+    }
+    setDockHot(false);
+    setTransient((t) => {
+      if (t) {
+        const next = clampBox(t);
+        setSaved({ ...next, vw: window.innerWidth, vh: window.innerHeight });
+      }
+      return null;
+    });
+  }, [canDock, setDockHot, startDockAnimation]);
+
+  // Top handle — immediate drag.
+  const onHandlePointerDown = useCallback((e: React.PointerEvent) => {
+    if (locked || docking || carrying) return;
+    e.preventDefault();
+    e.stopPropagation();
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    dragRef.current = { startX: e.clientX, startY: e.clientY, orig: { ...display } };
+    setTransient({ ...display });
+    setFocused(true);
+    setDragging(true);
+    setDraggingFlag(true);
+  }, [locked, docking, carrying, display]);
+
+  const onHandlePointerMove = useCallback((e: React.PointerEvent) => {
+    if (!dragRef.current) return;
+    applyDragPosition(
+      e.clientX,
+      e.clientY,
+      dragRef.current.orig,
+      dragRef.current.startX,
+      dragRef.current.startY,
+    );
+  }, [applyDragPosition]);
+
+  const onHandlePointerUp = useCallback((e: React.PointerEvent) => {
+    if (!dragRef.current) return;
+    try { (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId); } catch { /* noop */ }
+    commitDrag(e.clientX, e.clientY);
+  }, [commitDrag]);
+
+  // Body press-and-drag (threshold) + double-click sticky carry.
+  const pendingDrag = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    orig: Box;
+    armed: boolean;
+  } | null>(null);
+
+  const onBodyPointerDown = useCallback((e: React.PointerEvent) => {
+    if (locked || docking || carrying || dragging) return;
+    if (e.button !== 0) return;
+    const t = e.target as HTMLElement | null;
+    if (t?.closest(NO_GRAB_SEL)) return;
+    // Don't steal events from the dedicated handle (it has its own listeners).
+    if (t?.closest("[data-drag-handle]")) return;
+    pendingDrag.current = {
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startY: e.clientY,
+      orig: { ...display },
+      armed: false,
+    };
+    setFocused(true);
+  }, [locked, docking, carrying, dragging, display]);
+
+  useEffect(() => {
+    const onMove = (e: PointerEvent) => {
+      const pend = pendingDrag.current;
+      if (pend && e.pointerId === pend.pointerId && !pend.armed) {
+        const dist = Math.hypot(e.clientX - pend.startX, e.clientY - pend.startY);
+        if (dist >= DRAG_THRESHOLD_PX) {
+          pend.armed = true;
+          dragRef.current = { startX: pend.startX, startY: pend.startY, orig: pend.orig };
+          setTransient({ ...pend.orig });
+          setDragging(true);
+          setDraggingFlag(true);
+        }
+      }
+      if (!dragRef.current || carrying) return;
+      if (pend && e.pointerId !== pend.pointerId) return;
+      applyDragPosition(
+        e.clientX,
+        e.clientY,
+        dragRef.current.orig,
+        dragRef.current.startX,
+        dragRef.current.startY,
+      );
+    };
+
+    const onUp = (e: PointerEvent) => {
+      const pend = pendingDrag.current;
+      if (pend && e.pointerId === pend.pointerId) {
+        const wasArmed = pend.armed;
+        pendingDrag.current = null;
+        if (wasArmed && dragRef.current) {
+          commitDrag(e.clientX, e.clientY);
+          return;
+        }
+      }
+      if (dragRef.current && !carrying) {
+        // Handle-driven drag ended via window (pointer capture lost).
+        commitDrag(e.clientX, e.clientY);
+      }
+    };
+
+    window.addEventListener("pointermove", onMove, { passive: true });
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
+  }, [applyDragPosition, commitDrag, carrying]);
+
+  const onTileDoubleClick = useCallback((e: React.MouseEvent) => {
+    if (locked || docking || carrying || dragging) return;
+    const t = e.target as HTMLElement | null;
+    if (t?.closest(NO_GRAB_SEL)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    pendingDrag.current = null;
+    carryRef.current = {
+      offsetX: e.clientX - display.x,
+      offsetY: e.clientY - display.y,
+    };
+    setTransient({ ...display });
+    setFocused(true);
+    setDragging(true);
+    setCarrying(true);
+    setDraggingFlag(true);
+  }, [locked, docking, carrying, dragging, display]);
+
+  // Sticky carry: follow pointer; click or Esc to place (dock if over menu).
+  useEffect(() => {
+    if (!carrying) return;
+
+    const onMove = (e: PointerEvent) => {
+      const grab = carryRef.current;
+      if (!grab) return;
+      const next = {
+        x: e.clientX - grab.offsetX,
+        y: e.clientY - grab.offsetY,
+        w: display.w,
+        h: display.h,
+      };
+      const hot = canDock && inDockZone(e.clientY, e.clientX);
+      setDockHot(hot);
+      setTransient(hot ? next : clampBox(next));
+    };
+
+    const onDown = (e: PointerEvent) => {
+      if (e.detail >= 2) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      dropCarry(e.clientX, e.clientY);
+    };
+
+    const onClick = (e: MouseEvent) => {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    };
+
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        dropCarry();
+      }
+    };
+
+    window.addEventListener("pointermove", onMove, { passive: true });
+    window.addEventListener("pointerdown", onDown, true);
+    window.addEventListener("click", onClick, true);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerdown", onDown, true);
+      window.removeEventListener("click", onClick, true);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [carrying, canDock, display.w, display.h, dropCarry, setDockHot]);
+
+  useEffect(() => () => setDraggingFlag(false), []);
+
   const onResizeStart = useCallback((e: React.PointerEvent) => {
-    if (locked || docking) return;
+    if (!resizeEnabled || docking) return;
     e.stopPropagation();
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     resizeRef.current = { startX: e.clientX, startY: e.clientY, orig: { ...display } };
     setTransient({ ...display });
     setFocused(true);
-  }, [locked, docking, display]);
+  }, [resizeEnabled, docking, display]);
 
   const onResizeMove = useCallback((e: React.PointerEvent) => {
     if (!resizeRef.current) return;
@@ -340,28 +645,44 @@ export default function Floating({
     <div
       ref={rootRef}
       data-floating-id={id}
-      onPointerDown={() => setFocused(true)}
+      onPointerDown={onBodyPointerDown}
+      onDoubleClick={onTileDoubleClick}
       onMouseEnter={() => setFocused(true)}
-      onMouseLeave={() => { if (!dragging) setFocused(false); }}
-      className={`animate-boot_in fixed pointer-events-auto ${dragging ? "select-none" : ""} ${layoutEdit ? "ring-1 ring-jarvis-cyan/20" : ""}`}
+      onMouseLeave={() => { if (!dragging && !carrying) setFocused(false); }}
+      title={
+        carrying
+          ? "Click to place · drop on top menu to dock · Esc to cancel"
+          : canDock
+            ? "Drag to move · drop on top menu to dock"
+            : "Drag to move"
+      }
+      className={`animate-boot_in fixed pointer-events-auto ${dragging || carrying ? "select-none" : ""} ${layoutEdit ? "ring-1 ring-jarvis-cyan/20" : ""} ${carrying ? "ring-1 ring-jarvis-aqua/50" : ""}`}
       style={{
         left: display.x,
         top: display.y,
         width: display.w,
         height: autoHeight ? undefined : display.h,
-        zIndex: focused || dragging || docking ? z + 5 : z,
+        zIndex: focused || dragging || docking || carrying ? z + 5 : z,
         willChange: docking ? "transform, opacity" : undefined,
+        opacity: carrying ? 0.92 : undefined,
+        transition: carrying ? "opacity 120ms ease" : undefined,
       }}
     >
       {!locked && !docking && (
         <div
-          onPointerDown={onDragStart}
-          onPointerMove={onDragMove}
-          onPointerUp={onDragEnd}
-          onPointerCancel={onDragEnd}
+          data-drag-handle
+          onPointerDown={onHandlePointerDown}
+          onPointerMove={onHandlePointerMove}
+          onPointerUp={onHandlePointerUp}
+          onPointerCancel={onHandlePointerUp}
           title={canDock ? "Drag · drop on top menu to dock" : "Drag"}
-          className="absolute top-0 left-0 right-0 h-9 z-30 cursor-grab active:cursor-grabbing"
-          style={{ touchAction: "none" }}
+          className="absolute top-0 left-0 right-0 h-7 z-30 cursor-grab active:cursor-grabbing"
+          style={{
+            touchAction: "none",
+            background: dragging || carrying
+              ? "linear-gradient(180deg, rgba(125,211,252,0.18), transparent)"
+              : "linear-gradient(180deg, rgba(125,211,252,0.08), transparent)",
+          }}
         />
       )}
 
@@ -378,7 +699,7 @@ export default function Floating({
         {children}
       </div>
 
-      {!locked && !autoHeight && !docking && (
+      {resizeEnabled && !docking && (
         <div
           onPointerDown={onResizeStart}
           onPointerMove={onResizeMove}

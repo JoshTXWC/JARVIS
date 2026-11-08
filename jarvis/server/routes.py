@@ -553,12 +553,16 @@ async def select_llm_model(request: Request, body: LlmModelSelectBody):
     entry = catalog_entry(name)
     if entry and entry.get("cloud") and not cloud_key_configured(entry):
         env_name = entry.get("api_key_env") or "XAI_API_KEY"
+        key_hint = {
+            "XAI_API_KEY": "https://console.x.ai",
+            "GEMINI_API_KEY": "https://aistudio.google.com/app/apikey",
+        }.get(env_name, "your provider console")
         return JSONResponse(
             {
                 "ok": False,
                 "error": (
                     f"Cloud model needs {env_name} in .env — "
-                    f"get a key at https://console.x.ai then restart JARVIS."
+                    f"get a key at {key_hint} then restart JARVIS."
                 ),
             },
             status_code=400,
@@ -566,9 +570,23 @@ async def select_llm_model(request: Request, body: LlmModelSelectBody):
 
     # If we're currently on a local endpoint, remember it before jumping to cloud.
     cur_ep = (cfg.model.endpoint or "").rstrip("/")
-    if "api.x.ai" not in cur_ep and ("localhost" in cur_ep or "127.0.0.1" in cur_ep):
+    _cloud_ep_markers = (
+        "api.x.ai",
+        "generativelanguage.googleapis.com",
+        "api.openai.com",
+        "api.anthropic.com",
+        "openrouter.ai",
+    )
+    _cloud_key_envs = {
+        "XAI_API_KEY",
+        "GEMINI_API_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+    }
+    on_cloud_ep = any(m in cur_ep for m in _cloud_ep_markers)
+    if not on_cloud_ep and ("localhost" in cur_ep or "127.0.0.1" in cur_ep):
         cfg.model.local_endpoint = cur_ep or cfg.model.local_endpoint
-        if cfg.model.api_key_env and cfg.model.api_key_env != "XAI_API_KEY":
+        if cfg.model.api_key_env and cfg.model.api_key_env not in _cloud_key_envs:
             cfg.model.local_api_key_env = cfg.model.api_key_env
 
     route = resolve_model_route(
@@ -579,6 +597,18 @@ async def select_llm_model(request: Request, body: LlmModelSelectBody):
     cfg.model.model = route["model"]
     cfg.model.endpoint = route["endpoint"]
     cfg.model.api_key_env = route["api_key_env"]
+
+    logging.getLogger("jarvis.api").info(
+        "model route → %s @ %s (cloud=%s, key_env=%s)",
+        route["model"],
+        route["endpoint"],
+        route["cloud"],
+        route["api_key_env"],
+    )
+
+    # Leaving local inference — drop Ollama residents so GPU/CPU stop burning.
+    if route["cloud"]:
+        await asyncio.to_thread(_unload_ollama_residents)
 
     # Surgical persist under the top-level `model:` block.
     persisted = False
@@ -628,9 +658,9 @@ async def select_llm_model(request: Request, body: LlmModelSelectBody):
     }
 
 
-@router.get("/stats")
-async def stats(request: Request):
-    cpu = psutil.cpu_percent(interval=0.1)
+def _collect_stats_sync() -> dict:
+    """Blocking stats sample — must not run on the asyncio event loop."""
+    cpu = psutil.cpu_percent(interval=0.05)
     mem = psutil.virtual_memory()
     root = "C:\\" if platform.system() == "Windows" else "/"
     disk = psutil.disk_usage(root)
@@ -654,14 +684,22 @@ async def stats(request: Request):
     return out
 
 
+@router.get("/stats")
+async def stats(request: Request):
+    # GPU Windows counters can block for seconds — keep the event loop free
+    # so /models/select and chat stay responsive.
+    return await asyncio.to_thread(_collect_stats_sync)
+
+
 # --- GPU telemetry ---------------------------------------------------------
 _gpu_log = logging.getLogger("jarvis.gpu")
 _pynvml = None
 _pynvml_failed = False
 _gpu_win_cache: dict = {"t": 0.0, "data": None}
-_GPU_WIN_TTL_S = 1.25
-# Get-Counter over hundreds of GPU Engine instances can take several seconds.
-_GPU_WIN_PS_TIMEOUT_S = 12
+# Get-Counter '\GPU Engine(*)\...' expands to hundreds of instances and can
+# peg a CPU core for seconds — keep TTL long so idle DiagPanel polling is cheap.
+_GPU_WIN_TTL_S = 10.0
+_GPU_WIN_PS_TIMEOUT_S = 8
 
 
 def _try_pynvml():
@@ -693,6 +731,33 @@ def _ollama_resident_vram_gb() -> float | None:
             return (total / 1e9) if total else None
     except Exception:  # noqa: BLE001
         return None
+
+
+def _unload_ollama_residents() -> None:
+    """Best-effort: evict every Ollama runner so cloud mode doesn't keep a local GPU fire lit."""
+    log = logging.getLogger("jarvis.api")
+    try:
+        with httpx.Client(timeout=2.5) as client:
+            r = client.get("http://127.0.0.1:11434/api/ps")
+            if r.status_code != 200:
+                return
+            models = (r.json() or {}).get("models") or []
+            if not models:
+                return
+            for m in models:
+                name = (m.get("name") or m.get("model") or "").strip()
+                if not name:
+                    continue
+                try:
+                    client.post(
+                        "http://127.0.0.1:11434/api/generate",
+                        json={"model": name, "keep_alive": 0, "prompt": ""},
+                    )
+                    log.info("unloaded ollama resident %s (switched to cloud)", name)
+                except Exception as e:  # noqa: BLE001
+                    log.debug("ollama unload %s failed: %s", name, e)
+    except Exception as e:  # noqa: BLE001
+        log.debug("ollama unload skipped: %s", e)
 
 
 def _read_gpu_windows() -> dict:
@@ -729,11 +794,17 @@ def _read_gpu_windows() -> dict:
     try:
         # One PowerShell hop: max 3D/Compute util + adapter memory counters.
         # Include engtype_compute (lowercase / spaced instance names on AMD).
+        # Prefer a single 3D engtype counter sample; fall back to a capped
+        # wildcard scan so idle telemetry doesn't thrash the machine.
         ps = r"""
 $load = 0.0
 $samples = @()
-try { $samples = (Get-Counter '\GPU Engine(*)\Utilization Percentage' -ErrorAction Stop).CounterSamples } catch {}
-foreach ($s in $samples) {
+try {
+  $samples = (Get-Counter '\GPU Engine(*engtype_3D*)\Utilization Percentage' -SampleInterval 1 -MaxSamples 1 -ErrorAction Stop).CounterSamples
+} catch {
+  try { $samples = (Get-Counter '\GPU Engine(*)\Utilization Percentage' -SampleInterval 1 -MaxSamples 1 -ErrorAction Stop).CounterSamples } catch {}
+}
+foreach ($s in @($samples)) {
   $p = [string]$s.Path
   if ($p -match 'engtype_3D' -or $p -match 'engtype_[Cc]ompute') {
     if ($s.CookedValue -gt $load) { $load = [double]$s.CookedValue }
@@ -741,8 +812,8 @@ foreach ($s in $samples) {
 }
 $ded = 0.0; $shr = 0.0
 try {
-  $mem = (Get-Counter '\GPU Adapter Memory(*)\Dedicated Usage','\GPU Adapter Memory(*)\Shared Usage' -ErrorAction Stop).CounterSamples
-  foreach ($s in $mem) {
+  $mem = (Get-Counter '\GPU Adapter Memory(*)\Dedicated Usage','\GPU Adapter Memory(*)\Shared Usage' -SampleInterval 1 -MaxSamples 1 -ErrorAction Stop).CounterSamples
+  foreach ($s in @($mem)) {
     $p = [string]$s.Path
     if ($p -match 'dedicated usage') { $ded += [double]$s.CookedValue }
     elseif ($p -match 'shared usage') { $shr += [double]$s.CookedValue }

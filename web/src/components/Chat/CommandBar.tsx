@@ -1,14 +1,15 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useStore, nextId, type ChatAttachment } from "../../lib/store";
 import { wsClient } from "../../lib/ws";
-import { getLlmModels, selectLlmModel, type LlmModelInfo, type LlmModelsResponse } from "../../lib/api";
+import { getHealth, getLlmModels, selectLlmModel, type LlmModelInfo, type LlmModelsResponse } from "../../lib/api";
 import { normalizeWakeWord } from "../../lib/wakeWord";
 import { startWakeListening, stopWakeListening } from "../../lib/wakeMic";
 import ImageActions from "./ImageActions";
 
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 
-export default function CommandBar() {
+export default function CommandBar({ embedded = false }: { embedded?: boolean }) {
   const [value, setValue] = useState("");
   const [models, setModels] = useState<LlmModelInfo[]>([]);
   const [recommendedIds, setRecommendedIds] = useState<string[]>([]);
@@ -19,9 +20,11 @@ export default function CommandBar() {
   const [modelBusy, setModelBusy] = useState(false);
   const [modelError, setModelError] = useState<string | null>(null);
   const [infoId, setInfoId] = useState<string | null>(null);
+  const [menuPos, setMenuPos] = useState<{ left: number; bottom: number } | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const modelMenuRef = useRef<HTMLDivElement>(null);
+  const modelBtnRef = useRef<HTMLButtonElement>(null);
   const pushChat = useStore((s) => s.pushChat);
   const micEnabled = useStore((s) => s.micEnabled);
   const micMode = useStore((s) => s.micMode);
@@ -94,13 +97,37 @@ export default function CommandBar() {
     return () => window.removeEventListener("keydown", onKey);
   }, [infoId]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!modelOpen) {
+      setMenuPos(null);
       setInfoId(null);
       return;
     }
+    const place = () => {
+      const btn = modelBtnRef.current;
+      if (!btn) return;
+      const r = btn.getBoundingClientRect();
+      setMenuPos({
+        left: Math.min(r.left, window.innerWidth - 336),
+        bottom: window.innerHeight - r.top + 8,
+      });
+    };
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
+  }, [modelOpen]);
+
+  useEffect(() => {
+    if (!modelOpen) return;
     const onDoc = (e: MouseEvent) => {
-      if (!modelMenuRef.current?.contains(e.target as Node)) setModelOpen(false);
+      const t = e.target as Node;
+      if (modelMenuRef.current?.contains(t)) return;
+      if (modelBtnRef.current?.contains(t)) return;
+      setModelOpen(false);
     };
     document.addEventListener("mousedown", onDoc);
     return () => document.removeEventListener("mousedown", onDoc);
@@ -144,27 +171,49 @@ export default function CommandBar() {
   };
 
   const pickModel = async (id: string) => {
-    if (!id || id === activeModel || modelBusy) return;
+    if (!id || modelBusy) return;
+    if (id === activeModel) {
+      setModelOpen(false);
+      return;
+    }
     setModelBusy(true);
     setModelError(null);
     try {
       const res = await selectLlmModel(id);
-      if (res.ok) {
-        setSelectedModel(id);
-        setModelOpen(false);
+      if (!res.ok) {
+        setModelError(res.error || "Could not select model");
+        return;
+      }
+      const selected = res.selected || id;
+      setSelectedModel(selected);
+      setModelOpen(false);
+      // Re-read server truth so endpoint/provider match the live brain route.
+      try {
+        const [h, catalog] = await Promise.all([getHealth(), getLlmModels()]);
+        setHealth(h);
+        setModels(catalog.models || []);
+        setSelectedModel(catalog.selected || selected);
+        setRecommendedIds(catalog.recommended_ids || []);
+        setCloudIds(catalog.cloud_ids || []);
+        setHardware(catalog.hardware);
+      } catch {
         if (health) {
           setHealth({
             ...health,
             model: {
               ...health.model,
-              model: id,
+              model: selected,
               endpoint: res.endpoint || health.model.endpoint,
             },
           });
         }
-      } else {
-        setModelError(res.error || "Could not select model");
       }
+      if (res.cloud) {
+        // Soft confirmation in the status strip when GPU locals are being dropped.
+        setModelError(null);
+      }
+    } catch (e: any) {
+      setModelError(e?.message || "Could not select model");
     } finally {
       setModelBusy(false);
     }
@@ -178,7 +227,7 @@ export default function CommandBar() {
       : "Mic off · tap the mic to listen";
 
   return (
-    <div className="holo-panel h-full flex flex-col overflow-visible">
+    <div className={`${embedded ? "bg-transparent" : "holo-panel"} h-full flex flex-col overflow-visible`}>
       {pending.length > 0 && (
         <div className="flex flex-wrap gap-2 px-3 pt-2.5 pb-1 shrink-0">
           {pending.map((a, i) => (
@@ -237,9 +286,10 @@ export default function CommandBar() {
       )}
 
       <div className="flex items-center gap-2.5 px-2.5 py-2.5 shrink-0 mt-auto">
-        {/* Model switcher */}
-        <div className="relative shrink-0" ref={modelMenuRef}>
+        {/* Model switcher — menu portals to <body> so Floating drag/z-index can't trap clicks */}
+        <div className="relative shrink-0">
           <button
+            ref={modelBtnRef}
             type="button"
             onClick={() => setModelOpen((v) => !v)}
             disabled={!connected || modelBusy}
@@ -253,14 +303,22 @@ export default function CommandBar() {
           >
             <CpuIcon />
             <span className="text-mono text-[10px] text-jarvis-ice/85 truncate tracking-wide">
-              {activeLabel}
+              {modelBusy ? "…" : activeLabel}
             </span>
+            {(activeMeta?.cloud || cloudIdSet.has(activeModel)) && (
+              <span className="shrink-0 text-[8px] text-mono uppercase tracking-wider text-jarvis-aqua/80">
+                cloud
+              </span>
+            )}
             <ChevronIcon open={modelOpen} />
           </button>
-          {modelOpen && (
+          {modelOpen && menuPos && createPortal(
             <div
-              className="absolute bottom-[calc(100%+8px)] left-0 z-50 w-[320px] max-h-[min(420px,55vh)] overflow-y-auto rounded-lg p-1.5"
+              ref={modelMenuRef}
+              className="fixed z-[400] w-[320px] max-h-[min(420px,55vh)] overflow-y-auto rounded-lg p-1.5"
               style={{
+                left: menuPos.left,
+                bottom: menuPos.bottom,
                 background: "rgba(8,14,26,0.97)",
                 backdropFilter: "blur(16px)",
                 boxShadow:
@@ -294,7 +352,7 @@ export default function CommandBar() {
                 <>
                   {cloudModels.length > 0 && (
                     <ModelSection
-                      title="Cloud · xAI Grok"
+                      title="Cloud · Gemini / Grok"
                       models={cloudModels}
                       activeModel={activeModel}
                       infoId={infoId}
@@ -324,7 +382,8 @@ export default function CommandBar() {
                   )}
                 </>
               )}
-            </div>
+            </div>,
+            document.body,
           )}
         </div>
 

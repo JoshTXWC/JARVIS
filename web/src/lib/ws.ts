@@ -144,26 +144,43 @@ class JarvisWS {
       case "info":
         st.pushChat({ id: nextId(), role: "info", text: m.text, ts: Date.now() });
         break;
-      case "error":
-        st.pushChat({ id: nextId(), role: "error", text: m.text, ts: Date.now() });
+      case "error": {
+        // Brain / transport errors stay out of chat + TTS — System Log (TERM) only.
+        if (this.streamingId) {
+          st.dropChat(this.streamingId);
+          this.streamingId = null;
+        }
+        if (st.dockedPanels.includes("terminal")) st.undockPanel("terminal");
         st.setOrb("idle");
         break;
+      }
       case "user":
         // already pushed locally — but we still respect server echo if needed
         break;
-      case "assistant":
+      case "assistant": {
+        const text = typeof m.text === "string" ? m.text : "";
+        if (text.trimStart().startsWith("[brain error]")) {
+          if (this.streamingId) {
+            st.dropChat(this.streamingId);
+            this.streamingId = null;
+          }
+          if (st.dockedPanels.includes("terminal")) st.undockPanel("terminal");
+          st.setOrb("idle");
+          break;
+        }
         if (this.streamingId) {
           // Stream finished — replace partial with clean final text.
-          st.finalizeChat(this.streamingId, m.text);
+          st.finalizeChat(this.streamingId, text);
           this.streamingId = null;
         } else {
-          st.pushChat({ id: nextId(), role: "assistant", text: m.text, ts: Date.now() });
+          st.pushChat({ id: nextId(), role: "assistant", text, ts: Date.now() });
         }
         st.setOrb("speaking");
         setTimeout(() => {
           if (useStore.getState().orbState === "speaking") useStore.getState().setOrb("idle");
         }, 2500);
         break;
+      }
       case "stream_begin": {
         const id = nextId();
         this.streamingId = id;
@@ -292,8 +309,13 @@ class JarvisWS {
       }
       case "ui": {
         if (m.action === "barehands") {
-          if (m.open) st.setBarehandsOpen(true, m.url || undefined);
-          else st.setBarehandsOpen(false);
+          if (m.open) {
+            // Voice/tool “barehands” = fullscreen stage (not dashboard embed).
+            st.setBarehandsOpen(true, m.url || undefined, { embed: false });
+            st.setGestureEnabled(false);
+          } else {
+            st.setBarehandsOpen(false);
+          }
         }
         break;
       }

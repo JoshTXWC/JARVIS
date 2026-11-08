@@ -23,6 +23,7 @@ from typing import Any, AsyncIterator, Callable
 import httpx
 
 from ..config import Config
+from .http_client import make_async_client
 
 log = logging.getLogger("jarvis.brain")
 
@@ -31,6 +32,63 @@ log = logging.getLogger("jarvis.brain")
 _model_override: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "jarvis_model_override", default=None
 )
+
+
+def _http_error_detail(exc: BaseException) -> str:
+    """Make SSL / connect failures readable in the chat panel."""
+    msg = str(exc).strip() or type(exc).__name__
+    low = msg.lower()
+    if "certificate_verify_failed" in low or "ssl" in low:
+        return (
+            f"{msg} — cloud HTTPS blocked by TLS trust on this PC. "
+            "JARVIS now uses the OS certificate store; restart the backend. "
+            "If it persists, check corporate proxy / antivirus HTTPS scanning."
+        )
+    if "connect" in low:
+        return f"{msg} — could not reach {getattr(exc, 'request', None) and getattr(exc.request, 'url', '') or 'LLM endpoint'}"
+    return msg
+
+
+def _is_google_openai_endpoint(endpoint: str) -> bool:
+    ep = (endpoint or "").lower()
+    return "generativelanguage.googleapis.com" in ep or "googleapis.com/v1beta/openai" in ep
+
+
+def _openai_compat_payload(
+    *,
+    model: str,
+    messages: list[dict[str, Any]],
+    temperature: float,
+    max_tokens: int,
+    stream: bool,
+    frequency_penalty: float,
+    presence_penalty: float,
+    reasoning_effort: str | None,
+    endpoint: str,
+    tool_schemas: list[dict] | None,
+) -> dict[str, Any]:
+    """Build a chat/completions body. Google’s OpenAI shim rejects penalty fields."""
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stream": stream,
+    }
+    # Gemini OpenAI-compat returns 400 on frequency_penalty / presence_penalty.
+    if not _is_google_openai_endpoint(endpoint):
+        payload["frequency_penalty"] = frequency_penalty
+        payload["presence_penalty"] = presence_penalty
+    if reasoning_effort not in (None, "none", ""):
+        payload["reasoning_effort"] = reasoning_effort
+    if tool_schemas:
+        payload["tools"] = [{"type": "function", "function": s} for s in tool_schemas]
+    return payload
+
+
+def is_brain_error_text(text: str | None) -> bool:
+    t = (text or "").lstrip()
+    return t.startswith("[brain error]")
 
 
 TOOL_CALL_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
@@ -79,7 +137,7 @@ class LLMBrain:
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.mc = cfg.model
-        self._client = httpx.AsyncClient(timeout=self.mc.request_timeout_seconds)
+        self._client = make_async_client(timeout=self.mc.request_timeout_seconds)
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -151,23 +209,21 @@ class LLMBrain:
             headers["HTTP-Referer"] = "http://localhost:7341"
             headers["X-Title"] = "JARVIS_LOCAL"
 
-        norm_msgs = _normalise_messages(messages)
+        log.info("LLM chat → model=%s endpoint=%s", self.active_model, self.mc.endpoint)
 
-        payload: dict[str, Any] = {
-            "model": self.active_model,
-            "messages": norm_msgs,
-            "temperature": self.mc.temperature,
-            "max_tokens": self.mc.max_tokens,
-            "stream": False,
-            "frequency_penalty": self.mc.frequency_penalty,
-            "presence_penalty":  self.mc.presence_penalty,
-        }
-        if self.mc.reasoning_effort not in (None, "none", ""):
-            payload["reasoning_effort"] = self.mc.reasoning_effort
-        if self.mc.native_tool_calls and tool_schemas:
-            payload["tools"] = [
-                {"type": "function", "function": s} for s in tool_schemas
-            ]
+        norm_msgs = _normalise_messages(messages)
+        payload = _openai_compat_payload(
+            model=self.active_model,
+            messages=norm_msgs,
+            temperature=self.mc.temperature,
+            max_tokens=self.mc.max_tokens,
+            stream=False,
+            frequency_penalty=self.mc.frequency_penalty,
+            presence_penalty=self.mc.presence_penalty,
+            reasoning_effort=self.mc.reasoning_effort,
+            endpoint=self.mc.endpoint,
+            tool_schemas=tool_schemas if self.mc.native_tool_calls else None,
+        )
 
         try:
             resp = await self._client.post(url, json=payload, headers=headers)
@@ -177,8 +233,9 @@ class LLMBrain:
             log.error("LLM HTTP %s: %s — %s", e.response.status_code, e, body)
             return BrainReply(text=f"[brain error] HTTP {e.response.status_code}: {body}", raw=str(e))
         except httpx.HTTPError as e:
-            log.error("LLM HTTP error: %s", e)
-            return BrainReply(text=f"[brain error] {e}", raw=str(e))
+            detail = _http_error_detail(e)
+            log.error("LLM HTTP error: %s", detail)
+            return BrainReply(text=f"[brain error] {detail}", raw=detail)
 
         data = resp.json()
         choice = (data.get("choices") or [{}])[0]
@@ -226,20 +283,21 @@ class LLMBrain:
             headers["HTTP-Referer"] = "http://localhost:7341"
             headers["X-Title"] = "JARVIS_LOCAL"
 
+        log.info("LLM stream → model=%s endpoint=%s", self.active_model, self.mc.endpoint)
+
         norm_msgs = _normalise_messages(messages)
-        payload: dict[str, Any] = {
-            "model": self.active_model,
-            "messages": norm_msgs,
-            "temperature": self.mc.temperature,
-            "max_tokens": self.mc.max_tokens,
-            "stream": True,
-            "frequency_penalty": self.mc.frequency_penalty,
-            "presence_penalty":  self.mc.presence_penalty,
-        }
-        if self.mc.reasoning_effort not in (None, "none", ""):
-            payload["reasoning_effort"] = self.mc.reasoning_effort
-        if self.mc.native_tool_calls and tool_schemas:
-            payload["tools"] = [{"type": "function", "function": s} for s in tool_schemas]
+        payload = _openai_compat_payload(
+            model=self.active_model,
+            messages=norm_msgs,
+            temperature=self.mc.temperature,
+            max_tokens=self.mc.max_tokens,
+            stream=True,
+            frequency_penalty=self.mc.frequency_penalty,
+            presence_penalty=self.mc.presence_penalty,
+            reasoning_effort=self.mc.reasoning_effort,
+            endpoint=self.mc.endpoint,
+            tool_schemas=tool_schemas if self.mc.native_tool_calls else None,
+        )
 
         text_parts: list[str] = []
         # Accumulate streaming tool_calls keyed by index.
@@ -299,8 +357,9 @@ class LLMBrain:
                         if fn.get("arguments"):
                             slot["args"] += fn["arguments"]
         except httpx.HTTPError as e:
-            log.error("LLM stream HTTP error: %s", e)
-            return BrainReply(text=f"[brain error] {e}", raw=str(e))
+            detail = _http_error_detail(e)
+            log.error("LLM stream HTTP error: %s", detail)
+            return BrainReply(text=f"[brain error] {detail}", raw=detail)
 
         if loop_truncated and on_delta:
             # Tell the consumer we cut. Optional — the UI already has the text.

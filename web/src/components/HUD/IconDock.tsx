@@ -20,27 +20,16 @@ const ICONS: Record<DockableId, ReactNode> = {
       <path d="M12 7v5l3 2" strokeLinecap="round" />
     </svg>
   ),
-  terminal: (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
-      <rect x="3" y="5" width="18" height="14" rx="2" />
-      <path d="M7 10l3 2-3 2M12 14h5" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  ),
-  chat: (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
-      <path d="M5 6h14a2 2 0 012 2v7a2 2 0 01-2 2H10l-4 3v-3H5a2 2 0 01-2-2V8a2 2 0 012-2z" />
-    </svg>
-  ),
-  mission: (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
-      <path d="M8 4h9l-1 16H7L8 4z" />
-      <path d="M10 8h5M9.5 12h6M9 16h5" strokeLinecap="round" />
-    </svg>
-  ),
   toolFeed: (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
       <path d="M14.7 6.3a4 4 0 015 5L12 19l-4-1-1-4 7.7-7.7z" />
       <path d="M3 21l4-1" strokeLinecap="round" />
+    </svg>
+  ),
+  terminal: (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <path d="M7 9l3 3-3 3M12 15h5" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   ),
   settings: (
@@ -59,21 +48,21 @@ export default function IconDock({ onUndock }: Props) {
   const docked = useStore((s) => s.dockedPanels);
   const undockPanel = useStore((s) => s.undockPanel);
   const dockHot = useStore((s) => s.dockHot);
-
   const visible = DOCKABLE_IDS.filter((id) => docked.includes(id));
 
   return (
     <div
       id="jarvis-icon-dock"
-      data-reticle
       className="pointer-events-auto flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg min-h-[44px] min-w-[120px] transition-all duration-200"
       style={{
         background: dockHot ? "rgba(125,211,252,0.16)" : "rgba(8,14,26,0.5)",
         boxShadow: dockHot
           ? "0 0 0 1px rgba(125,211,252,0.55), 0 0 28px -4px rgba(125,211,252,0.45)"
           : "inset 0 0 0 1px rgba(125,211,252,0.14)",
+        // While highlighting a drop, don't let dock icons steal the release.
+        pointerEvents: dockHot ? "none" : "auto",
       }}
-      title={dockHot ? "Release to dock tile" : "Open a panel"}
+      title={dockHot ? "Release to dock tile" : "Open a panel · drag tiles here to dock"}
     >
       {visible.length === 0 ? (
         <span className="text-mono text-[9px] tracking-[0.28em] uppercase text-jarvis-cyan/35 px-2">
@@ -89,6 +78,9 @@ export default function IconDock({ onUndock }: Props) {
               title={meta.title}
               data-reticle
               onClick={() => {
+                // Guard accidental undock right after a gesture drop into the dock.
+                if (useStore.getState().dockHot) return;
+                if (Date.now() < useStore.getState().dockDropLockUntil) return;
                 undockPanel(id);
                 onUndock?.(id);
               }}

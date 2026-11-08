@@ -18,6 +18,7 @@ from typing import Any
 import httpx
 
 from ..config import Config
+from .http_client import make_async_client
 
 log = logging.getLogger("jarvis.embeddings")
 
@@ -31,7 +32,7 @@ class EmbeddingClient:
         self.url = base + "/embeddings"
         self.model = u.embed_model
         self.api_key = cfg.model.api_key
-        self._client = httpx.AsyncClient(timeout=30)
+        self._client = make_async_client(timeout=30)
         self._dim: int | None = None
         self._disabled_until: float = 0.0
 

@@ -36,7 +36,29 @@
 
 html, body, #root { height: 100%; width: 100%; }
 
-* { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+/* Hands mode: webcam is the world — quiet the decorative body layers */
+body[data-jarvis-hands="1"]::before,
+body[data-jarvis-hands="1"]::after {
+  opacity: 0 !important;
+}
+
+* {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  /* HUD: drag/click only — no text highlight or image drag ghosts */
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-user-drag: none;
+  user-drag: none;
+}
+
+/* Allow caret + selection only where typing is expected */
+input, textarea, [contenteditable="true"] {
+  -webkit-user-select: text;
+  user-select: text;
+  -webkit-user-drag: auto;
+  user-drag: auto;
+}
 
 body {
   background: var(--ink);
@@ -60,7 +82,9 @@ body::before {
     radial-gradient(ellipse 100% 70% at 50% 110%, rgba(94,234,212,0.05), transparent 70%),
     linear-gradient(180deg, #03070f 0%, #050b18 50%, #02050d 100%);
   z-index: -3;
-  animation: aurora_breathe 24s ease-in-out infinite;
+  /* Opacity-only pulse — filter:hue-rotate on a full-viewport layer pegs the GPU at idle. */
+  animation: aurora_breathe 28s ease-in-out infinite;
+  will-change: opacity;
 }
 
 body::after {
@@ -76,8 +100,8 @@ body::after {
 }
 
 @keyframes aurora_breathe {
-  0%, 100% { filter: hue-rotate(0deg) brightness(1); transform: scale(1); }
-  50%      { filter: hue-rotate(-8deg) brightness(1.06); transform: scale(1.02); }
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.88; }
 }
 
 /* ── Scrollbars — ultra thin, glassy ─────────────────────────────────── */
@@ -94,6 +118,12 @@ body::after {
 * { scrollbar-width: thin; scrollbar-color: rgba(125,211,252,0.3) transparent; }
 
 ::selection { background: rgba(125,211,252,0.28); color: #fff; }
+
+/* Reticle HUD — OS cursor hidden; the targeting reticle is the pointer. */
+html.jarvis-reticle-hud,
+html.jarvis-reticle-hud * {
+  cursor: none !important;
+}
 
 /* ─────────────────────────────────────────────────────────────────────────
    Components
@@ -534,6 +564,54 @@ body::after {
     inset -1px -1px 0 rgba(0,0,0,0.26);
 }
 
+/* Chat dialogue row — icon + text, no card background */
+.chat-tile {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.65rem;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  overflow: visible;
+}
+.chat-tile-icon {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 0.15rem 0 0;
+  color: rgba(125, 211, 252, 0.85);
+  flex-shrink: 0;
+}
+.chat-tile-body {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+}
+.chat-tile-title {
+  font-family: "Inter", "Rajdhani", system-ui, sans-serif;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: rgba(224, 242, 254, 0.95);
+  text-shadow: 0 0 16px rgba(125, 211, 252, 0.25);
+}
+.chat-tile-user {
+  margin-left: auto;
+  max-width: min(92%, 420px);
+  flex-direction: row-reverse;
+}
+.chat-tile-user .chat-tile-body {
+  text-align: right;
+}
+.chat-tile-user .chat-tile-title {
+  color: rgba(165, 243, 252, 0.95);
+}
+.chat-tile-error .chat-tile-icon {
+  color: rgba(251, 113, 133, 0.9);
+}
+
 /* Soft elevated chip — badges / chrome buttons (rounded-lg max) */
 .glass-chip {
   display: inline-flex;
@@ -699,4 +777,11 @@ button.rounded-3xl {
     animation-iteration-count: 1 !important;
     transition-duration: 0.001ms !important;
   }
+}
+
+/* Pause decorative loops while the window is in the background. */
+html.jarvis-hidden *,
+html.jarvis-hidden *::before,
+html.jarvis-hidden *::after {
+  animation-play-state: paused !important;
 }

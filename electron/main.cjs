@@ -303,6 +303,11 @@ function createWindow() {
   mainWindow.on("move", scheduleSave);
   mainWindow.on("maximize", scheduleSave);
   mainWindow.on("unmaximize", scheduleSave);
+
+  // HUD interaction: no OS context menu on right-click / long-press.
+  mainWindow.webContents.on("context-menu", (e) => {
+    e.preventDefault();
+  });
 }
 
 async function loadApp() {

@@ -1,11 +1,13 @@
-/** Core panels that live in the centered icon dock when not on the canvas. */
+/** Core panels that live in the centered icon dock when not on the canvas.
+ *  Chat + command bar are fused into a single always-open Dialogue panel,
+ *  so they are intentionally absent from this list.
+ *  Mission Log stays retired. Terminal is available for ops / brain errors.
+ */
 export const DOCKABLE_IDS = [
   "diag",
   "uptime",
-  "terminal",
-  "chat",
-  "mission",
   "toolFeed",
+  "terminal",
   "settings",
 ] as const;
 
@@ -15,13 +17,12 @@ export function isDockable(id: string): id is DockableId {
   return (DOCKABLE_IDS as readonly string[]).includes(id);
 }
 
-/** Default: everything docked except chat (command bar is always open). */
+/** Default canvas: Dialogue only — everything else starts in the icon dock. */
 export const DEFAULT_DOCKED: string[] = [
   "diag",
   "uptime",
-  "terminal",
-  "mission",
   "toolFeed",
+  "terminal",
   "settings",
 ];
 
@@ -29,11 +30,9 @@ export const DOCK_META: Record<
   DockableId,
   { label: string; title: string }
 > = {
-  diag:     { label: "SYS",  title: "System Diagnostics" },
+  diag:     { label: "SYS",  title: "System Status" },
   uptime:   { label: "UP",   title: "Uptime" },
-  terminal: { label: "TERM", title: "Terminal" },
-  chat:     { label: "CHAT", title: "Dialogue" },
-  mission:  { label: "LOG",  title: "Mission Log" },
   toolFeed: { label: "TOOL", title: "Tool Feed" },
+  terminal: { label: "TERM", title: "Terminal" },
   settings: { label: "SET",  title: "Settings" },
 };

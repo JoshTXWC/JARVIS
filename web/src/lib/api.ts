@@ -154,12 +154,23 @@ export async function selectLlmModel(model: string): Promise<{
   persisted?: boolean;
   error?: string;
 }> {
-  const r = await fetch("/api/models/select", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model }),
-  });
-  return r.json();
+  try {
+    const r = await fetch("/api/models/select", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok && data?.ok !== true) {
+      return {
+        ok: false,
+        error: data?.error || `Select failed (${r.status})`,
+      };
+    }
+    return data;
+  } catch (e: any) {
+    return { ok: false, error: e?.message || "Network error selecting model" };
+  }
 }
 
 // ── Image analysis / img2img / image→3D ─────────────────────────────────

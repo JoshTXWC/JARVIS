@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { openBarehands, closeBarehands } from "../../lib/api";
+import { closeBarehands } from "../../lib/api";
 import { useStore } from "../../lib/store";
 import IconDock from "./IconDock";
 import type { DockableId } from "../../lib/dockCatalog";
@@ -12,25 +12,49 @@ export default function TopBar({ onUndock }: Props) {
   const [now, setNow] = useState(new Date());
   const connected = useStore((s) => s.connected);
   const barehandsOpen = useStore((s) => s.barehandsOpen);
+  const barehandsEmbed = useStore((s) => s.barehandsEmbed);
   const barehandsBusy = useStore((s) => s.barehandsBusy);
   const setBarehandsOpen = useStore((s) => s.setBarehandsOpen);
   const setBarehandsBusy = useStore((s) => s.setBarehandsBusy);
+  const gestureEnabled = useStore((s) => s.gestureEnabled);
+  const setGestureEnabled = useStore((s) => s.setGestureEnabled);
+  const backgroundMode = useStore((s) => s.backgroundMode);
+  const setBackgroundMode = useStore((s) => s.setBackgroundMode);
+  const neuralOn = backgroundMode === "neural";
 
-  const toggleBarehands = async () => {
+  // Unified Hands = gesture tracker (webcam bg + cursor + scale). Fullscreen
+  // Barehands stage still closes via the same button when opened by voice.
+  const handsOn = gestureEnabled;
+  const stageFullscreen = barehandsOpen && !barehandsEmbed;
+
+  const toggleHands = async () => {
     if (barehandsBusy) return;
-    setBarehandsBusy(true);
-    try {
-      if (barehandsOpen) {
+    if (stageFullscreen) {
+      setBarehandsBusy(true);
+      try {
         setBarehandsOpen(false);
         await closeBarehands().catch(() => undefined);
-      } else {
-        const res = await openBarehands();
-        if (res.ok) setBarehandsOpen(true, res.url);
-        else console.warn("[barehands]", res.error);
+      } finally {
+        setBarehandsBusy(false);
       }
-    } finally {
-      setBarehandsBusy(false);
+      return;
     }
+    if (handsOn) {
+      setGestureEnabled(false);
+      // Close any leftover embed from older sessions
+      if (barehandsOpen) {
+        setBarehandsBusy(true);
+        try {
+          setBarehandsOpen(false);
+          await closeBarehands().catch(() => undefined);
+        } finally {
+          setBarehandsBusy(false);
+        }
+      }
+      return;
+    }
+    // One pipeline only — no second Barehands camera (that caused lag).
+    setGestureEnabled(true);
   };
 
   useEffect(() => {
@@ -50,16 +74,14 @@ export default function TopBar({ onUndock }: Props) {
     day: "numeric",
   });
 
-  // Stay above the Barehands stage so the Hands toggle remains usable.
-  const barZ = barehandsOpen ? "z-[97]" : "z-40";
+  const barZ = stageFullscreen ? "z-[97]" : "z-40";
 
   return (
     <div className={`absolute top-0 inset-x-0 ${barZ} pointer-events-none px-2`}>
       <div className="relative flex items-center justify-between py-2.5 gap-3">
-        {/* Brand — dim while Barehands owns the screen */}
         <div
           className={`pointer-events-auto flex items-center gap-3 shrink-0 min-w-[140px] transition-opacity ${
-            barehandsOpen ? "opacity-40" : ""
+            stageFullscreen ? "opacity-40" : ""
           }`}
         >
           <div className="relative w-8 h-8 grid place-items-center">
@@ -85,42 +107,73 @@ export default function TopBar({ onUndock }: Props) {
           </div>
         </div>
 
-        {/* Centered icon dock — hidden while Barehands is fullscreen */}
-        {!barehandsOpen && (
+        {!stageFullscreen && (
           <div className="absolute left-1/2 -translate-x-1/2 top-1/2 -translate-y-1/2">
             <IconDock onUndock={onUndock} />
           </div>
         )}
 
-        {/* Top-right: Barehands + clock */}
         <div className="pointer-events-auto flex items-center gap-2.5 shrink-0 min-w-[140px] justify-end">
+          {!stageFullscreen && (
+            <button
+              type="button"
+              onClick={() => setBackgroundMode(neuralOn ? "orb" : "neural")}
+              title={
+                neuralOn
+                  ? "Switch to classic JARVIS orb background"
+                  : "Neural cloud background — zoom, orbit, click nodes"
+              }
+              className={`h-9 px-2.5 rounded-lg flex items-center gap-1.5 transition-all ${
+                neuralOn ? "text-jarvis-ice" : "text-jarvis-ice/70 hover:text-jarvis-ice"
+              }`}
+              style={{
+                background: neuralOn
+                  ? "rgba(167,139,250,0.18)"
+                  : "rgba(14,24,42,0.55)",
+                boxShadow: neuralOn
+                  ? "0 0 0 1px rgba(167,139,250,0.5), 0 0 16px -4px rgba(167,139,250,0.45)"
+                  : "inset 1px 1px 0 rgba(255,255,255,0.08), inset -1px -1px 0 rgba(0,0,0,0.28), inset 0 0 0 1px rgba(125,211,252,0.16)",
+              }}
+            >
+              <NeuralIcon active={neuralOn} />
+              <span className="text-mono text-[10px] tracking-[0.18em] uppercase">
+                Neural
+              </span>
+            </button>
+          )}
           <button
             type="button"
-            onClick={() => void toggleBarehands()}
+            onClick={() => void toggleHands()}
             disabled={!connected || barehandsBusy}
             title={
-              barehandsOpen
-                ? "Close Barehands (or say “close barehands”)"
-                : "Open Barehands — hand-tracked glass stage (or say “barehands”)"
+              stageFullscreen
+                ? "Close Barehands stage"
+                : handsOn
+                  ? "Disable Hands (webcam bg · pinch=click · fist=drag · 2 hands=scale)"
+                  : "Hands — webcam background + unified hand controls"
             }
             className={`h-9 px-2.5 rounded-lg flex items-center gap-1.5 transition-all disabled:opacity-40 ${
-              barehandsOpen ? "text-jarvis-ice" : "text-jarvis-ice/70 hover:text-jarvis-ice"
+              handsOn || stageFullscreen
+                ? "text-jarvis-ice"
+                : "text-jarvis-ice/70 hover:text-jarvis-ice"
             }`}
             style={{
-              background: barehandsOpen
-                ? "rgba(125,211,252,0.16)"
-                : "rgba(14,24,42,0.55)",
-              boxShadow: barehandsOpen
-                ? "0 0 0 1px rgba(125,211,252,0.45), 0 0 16px -4px rgba(125,211,252,0.5)"
-                : "inset 1px 1px 0 rgba(255,255,255,0.08), inset -1px -1px 0 rgba(0,0,0,0.28), inset 0 0 0 1px rgba(125,211,252,0.16)",
+              background:
+                handsOn || stageFullscreen
+                  ? "rgba(125,211,252,0.16)"
+                  : "rgba(14,24,42,0.55)",
+              boxShadow:
+                handsOn || stageFullscreen
+                  ? "0 0 0 1px rgba(125,211,252,0.45), 0 0 16px -4px rgba(125,211,252,0.5)"
+                  : "inset 1px 1px 0 rgba(255,255,255,0.08), inset -1px -1px 0 rgba(0,0,0,0.28), inset 0 0 0 1px rgba(125,211,252,0.16)",
             }}
           >
-            <HandIcon active={barehandsOpen} />
+            <HandIcon active={handsOn || stageFullscreen} />
             <span className="text-mono text-[10px] tracking-[0.18em] uppercase">
               {barehandsBusy ? "…" : "Hands"}
             </span>
           </button>
-          {!barehandsOpen && (
+          {!stageFullscreen && (
             <div className="text-mono text-right leading-tight tabular-nums">
               <div className="text-[15px] text-jarvis-ice glow-text tracking-wider">{time}</div>
               <div className="text-[10px] text-jarvis-ice/40 uppercase tracking-[0.18em]">{date}</div>
@@ -128,7 +181,7 @@ export default function TopBar({ onUndock }: Props) {
           )}
         </div>
       </div>
-      {!barehandsOpen && <div className="glass-divider" />}
+      {!stageFullscreen && <div className="glass-divider" />}
     </div>
   );
 }
@@ -160,6 +213,25 @@ function HandIcon({ active }: { active: boolean }) {
         strokeLinecap="round"
         strokeLinejoin="round"
       />
+    </svg>
+  );
+}
+
+function NeuralIcon({ active }: { active: boolean }) {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      className={active ? "text-violet-300" : "text-jarvis-cyan/70"}
+    >
+      <circle cx="6" cy="7" r="2" />
+      <circle cx="18" cy="7" r="2" />
+      <circle cx="12" cy="17" r="2" />
+      <path d="M8 8l3.5 7M16 8l-3.5 7M8 7h8" strokeLinecap="round" />
     </svg>
   );
 }

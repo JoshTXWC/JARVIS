@@ -1,5 +1,5 @@
 /**
- * SETTINGS — premium glass popup matching the HUD mock.
+ * SETTINGS — refined control surface for the fused Dialogue HUD.
  */
 import { useEffect, useState } from "react";
 import { useStore } from "../../lib/store";
@@ -14,12 +14,16 @@ export default function Settings() {
   const micEnabled = useStore((s) => s.micEnabled);
   const bargeIn = useStore((s) => s.bargeIn);
   const setBargeIn = useStore((s) => s.setBargeIn);
+  const gestureEnabled = useStore((s) => s.gestureEnabled);
+  const setGestureEnabled = useStore((s) => s.setGestureEnabled);
+  const gestureStatus = useStore((s) => s.gestureStatus);
   const clearChat = useStore((s) => s.clearChat);
   const clearMedia = useStore((s) => s.clearMedia);
   const clearTools = useStore((s) => s.clearTools);
   const setReader = useStore((s) => s.setReader);
   const prevSessionAvailable = useStore((s) => s.prevSessionAvailable);
   const restoreLastSession = useStore((s) => s.restoreLastSession);
+  const dockPanel = useStore((s) => s.dockPanel);
 
   const [agents, setAgents] = useState<string[]>([]);
   useEffect(() => {
@@ -38,50 +42,65 @@ export default function Settings() {
     try { await fetch("/api/cleanslate", { method: "POST" }); } catch { /* noop */ }
   };
 
+  const modelName = health?.model.model || "—";
+  const provider = health?.model.provider || "—";
+
   return (
-    <div className="holo-panel flex flex-col h-full overflow-hidden">
-      {/* Hero header */}
+    <div className="holo-panel flex flex-col h-full overflow-hidden relative">
+      {/* Atmosphere wash */}
       <div
-        className="relative px-5 pt-4 pb-3 shrink-0"
+        className="pointer-events-none absolute inset-0 opacity-90"
         style={{
           background:
-            "radial-gradient(120% 140% at 0% 0%, rgba(125,211,252,0.18), transparent 55%), " +
-            "linear-gradient(180deg, rgba(14,24,42,0.35), transparent)",
+            "radial-gradient(90% 70% at 0% 0%, rgba(125,211,252,0.16), transparent 55%)," +
+            "radial-gradient(70% 50% at 100% 100%, rgba(56,189,248,0.08), transparent 50%)," +
+            "linear-gradient(180deg, rgba(8,14,26,0.2), transparent 40%)",
         }}
-      >
+      />
+
+      <header className="relative shrink-0 px-5 pt-5 pb-4">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <div className="text-display text-[12px] tracking-[0.42em] text-shimmer">SETTINGS</div>
-            <div className="mt-1 text-mono text-[10px] text-jarvis-ice/45 tracking-wide">
-              Mission control preferences
+            <div className="text-mono text-[9px] tracking-[0.38em] uppercase text-jarvis-cyan/50">
+              Mission control
             </div>
+            <h2 className="mt-1 text-display text-[22px] tracking-[0.18em] text-jarvis-ice/95">
+              SETTINGS
+            </h2>
           </div>
-          <div
-            className="px-2 py-1 rounded-lg text-mono text-[9px] tracking-[0.2em] uppercase text-jarvis-cyan/70"
-            style={{ boxShadow: "inset 0 0 0 1px rgba(125,211,252,0.25)", background: "rgba(125,211,252,0.08)" }}
+          <button
+            type="button"
+            onClick={() => dockPanel("settings")}
+            className="text-mono text-[10px] tracking-[0.2em] uppercase px-2.5 py-1.5 rounded-md text-jarvis-ice/55 hover:text-jarvis-ice transition-colors"
+            style={{ boxShadow: "inset 0 0 0 1px rgba(125,211,252,0.2)" }}
+            title="Dock settings"
           >
-            LIVE
-          </div>
+            Close
+          </button>
         </div>
-        <div className="mt-3 grid grid-cols-3 gap-2">
-          <StatPill label="MODEL" value={health?.model.model || "—"} />
-          <StatPill label="PROVIDER" value={health?.model.provider || "—"} />
-          <StatPill label="TOOLS" value={String(health?.tools ?? 0)} />
-        </div>
-        <div className="absolute bottom-0 left-4 right-4 glass-divider" />
-      </div>
 
-      <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4 space-y-4">
+        <div className="mt-4 grid grid-cols-2 gap-2">
+          <HeroStat label="Active model" value={modelName} />
+          <HeroStat label="Provider" value={provider} />
+        </div>
+        <div className="mt-2 grid grid-cols-3 gap-2">
+          <MiniStat label="Tools" value={String(health?.tools ?? 0)} />
+          <MiniStat label="Plugins" value={String(health?.plugins?.length ?? 0)} />
+          <MiniStat label="Mode" value={health?.permission_mode || "—"} />
+        </div>
+      </header>
+
+      <div className="relative flex-1 min-h-0 overflow-y-auto px-4 pb-5 space-y-3">
         {prevSessionAvailable && (
-          <Section title="Session" icon="◎">
-            <p className="text-[11px] text-jarvis-ice/45 mb-2 leading-relaxed">
-              A previous session was kept aside on launch. Memory is always preserved.
+          <Panel title="Session">
+            <p className="text-[11px] text-jarvis-ice/45 mb-3 leading-relaxed">
+              A previous session is available. Memory is always preserved.
             </p>
             <ActionBtn label="Restore previous session" onClick={() => restoreLastSession()} accent />
-          </Section>
+          </Panel>
         )}
 
-        <Section title="Voice" icon="◈">
+        <Panel title="Voice & input">
           <ToggleRow
             label="Speak aloud"
             hint="JARVIS replies with TTS"
@@ -98,88 +117,100 @@ export default function Settings() {
             }}
           />
           <ToggleRow
-            label="Barge-in cancel"
-            hint="Say “cancel” while speaking"
+            label="Barge-in interrupt"
+            hint="Talk over JARVIS to cut him off"
             value={bargeIn}
             onChange={setBargeIn}
           />
-        </Section>
+          <ToggleRow
+            label="Hands"
+            hint={gestureStatus || "Webcam bg · pinch=click · fist=drag · 2 hands=scale"}
+            value={gestureEnabled}
+            onChange={setGestureEnabled}
+          />
+        </Panel>
 
-        <Section title="Display" icon="▣">
+        <Panel title="Layout">
           <ActionBtn
-            label="Reset panel layout"
+            label="Reset panel positions"
             onClick={() => { if (confirm("Reset all panel positions?")) resetAllLayouts(); }}
           />
-        </Section>
-
-        <Section title="System" icon="⬡">
-          <KV k="Image model"  v={health?.image_model || "—"} />
-          <KV k="Permissions"  v={health?.permission_mode || "—"} />
-          <KV k="Plugins"      v={String(health?.plugins?.length ?? 0)} />
-          <KV k="Agents"       v={(agents.length ? agents : health?.agents || []).join(", ") || "—"} />
           <p className="pt-2 text-[10px] text-jarvis-ice/35 leading-relaxed">
-            Core model endpoint lives in <span className="text-jarvis-aqua">config.yaml</span>.
-            Use the command bar model switcher for hot-swaps.
+            Open SYS / TERM / SET from the top icon dock. Dialogue stays on the canvas.
           </p>
-        </Section>
+        </Panel>
 
-        <Section title="Data" icon="▤">
+        <Panel title="Runtime">
+          <KV k="Image model" v={health?.image_model || "—"} />
+          <KV k="Endpoint" v={health?.model.endpoint || "—"} />
+          <KV
+            k="Agents"
+            v={(agents.length ? agents : health?.agents || []).join(", ") || "—"}
+          />
+        </Panel>
+
+        <Panel title="Data">
           <div className="grid grid-cols-1 gap-1.5">
             <ActionBtn label="Clear chat history" onClick={() => { if (confirm("Wipe chat?")) clearChat(); }} />
             <ActionBtn label="Clear media bay" onClick={() => { if (confirm("Wipe media?")) clearMedia(); }} />
             <ActionBtn label="Clear tool history" onClick={() => { if (confirm("Wipe tool history?")) clearTools(); }} />
-            <ActionBtn
-              label="Clean slate"
-              danger
-              onClick={cleanSlate}
-            />
+            <ActionBtn label="Clean slate" danger onClick={cleanSlate} />
           </div>
-        </Section>
+        </Panel>
       </div>
     </div>
   );
 }
 
-function StatPill({ label, value }: { label: string; value: string }) {
+function HeroStat({ label, value }: { label: string; value: string }) {
+  return (
+    <div
+      className="rounded-xl px-3 py-2.5 min-w-0"
+      style={{
+        background: "linear-gradient(160deg, rgba(125,211,252,0.12), rgba(8,14,26,0.55))",
+        boxShadow: "inset 0 0 0 1px rgba(125,211,252,0.22)",
+      }}
+    >
+      <div className="text-[8px] text-mono tracking-[0.28em] text-jarvis-cyan/45 uppercase">{label}</div>
+      <div className="text-[13px] text-mono text-jarvis-ice mt-1 truncate" title={value}>{value}</div>
+    </div>
+  );
+}
+
+function MiniStat({ label, value }: { label: string; value: string }) {
   return (
     <div
       className="rounded-lg px-2.5 py-2 min-w-0"
       style={{
-        background: "rgba(8,14,26,0.45)",
-        boxShadow: "inset 0 0 0 1px rgba(125,211,252,0.14)",
+        background: "rgba(8,14,26,0.4)",
+        boxShadow: "inset 0 0 0 1px rgba(125,211,252,0.12)",
       }}
     >
-      <div className="text-[8px] text-mono tracking-[0.28em] text-jarvis-cyan/40 uppercase">{label}</div>
-      <div className="text-[11px] text-mono text-jarvis-ice/90 truncate mt-0.5" title={value}>{value}</div>
+      <div className="text-[8px] text-mono tracking-[0.22em] text-jarvis-cyan/35 uppercase">{label}</div>
+      <div className="text-[11px] text-mono text-jarvis-ice/85 truncate mt-0.5" title={value}>{value}</div>
     </div>
   );
 }
 
-function Section({
-  title,
-  icon,
-  children,
-}: {
-  title: string;
-  icon: string;
-  children: React.ReactNode;
-}) {
+function Panel({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <section
-      className="rounded-lg p-3.5 space-y-2.5"
+      className="rounded-xl px-3.5 py-3 space-y-1.5"
       style={{
-        background: "rgba(14,24,42,0.35)",
+        background: "rgba(10,18,32,0.55)",
         boxShadow:
-          "inset 1px 1px 0 rgba(255,255,255,0.06), inset -1px -1px 0 rgba(0,0,0,0.28), inset 0 0 0 1px rgba(125,211,252,0.10)",
+          "inset 1px 1px 0 rgba(255,255,255,0.05), inset -1px -1px 0 rgba(0,0,0,0.35), inset 0 0 0 1px rgba(125,211,252,0.12)",
       }}
     >
-      <div className="flex items-center gap-2">
-        <span className="text-jarvis-cyan/55 text-[11px]">{icon}</span>
-        <span className="text-[10px] tracking-[0.32em] text-jarvis-cyan/70 uppercase text-mono">
+      <div className="flex items-center gap-2 pb-1.5 mb-0.5"
+        style={{ boxShadow: "inset 0 -1px 0 rgba(125,211,252,0.08)" }}
+      >
+        <span className="w-1 h-1 rounded-full bg-jarvis-cyan/70" />
+        <span className="text-[10px] tracking-[0.28em] text-jarvis-cyan/65 uppercase text-mono">
           {title}
         </span>
       </div>
-      <div className="space-y-1">{children}</div>
+      <div className="space-y-0.5">{children}</div>
     </section>
   );
 }
@@ -196,26 +227,31 @@ function ToggleRow({
   onChange: (v: boolean) => void;
 }) {
   return (
-    <label className="flex items-center justify-between gap-3 cursor-pointer py-1.5 px-1 rounded-lg hover:bg-jarvis-cyan/[0.04] transition-colors">
+    <label className="flex items-center justify-between gap-3 cursor-pointer py-2 px-1.5 rounded-lg hover:bg-jarvis-cyan/[0.05] transition-colors">
       <div className="min-w-0">
         <div className="text-[12px] text-jarvis-ice/90">{label}</div>
-        {hint && <div className="text-[10px] text-jarvis-ice/35 mt-0.5">{hint}</div>}
+        {hint && <div className="text-[10px] text-jarvis-ice/35 mt-0.5 leading-snug">{hint}</div>}
       </div>
       <button
         type="button"
         onClick={() => onChange(!value)}
-        className="relative w-10 h-5 rounded-full transition-colors shrink-0"
+        className="relative w-11 h-[22px] rounded-full transition-colors shrink-0"
         style={{
-          background: value ? "rgba(125,211,252,0.75)" : "rgba(186,230,253,0.12)",
+          background: value
+            ? "linear-gradient(90deg, rgba(56,189,248,0.85), rgba(125,211,252,0.95))"
+            : "rgba(186,230,253,0.1)",
           boxShadow: value
-            ? "0 0 14px rgba(125,211,252,0.55)"
-            : "inset 0 0 0 1px rgba(186,230,253,0.2)",
+            ? "0 0 16px rgba(125,211,252,0.45)"
+            : "inset 0 0 0 1px rgba(186,230,253,0.18)",
         }}
         aria-pressed={value}
       >
         <span
-          className="absolute top-0.5 w-4 h-4 rounded-full bg-jarvis-ice transition-all"
-          style={{ left: value ? 22 : 2 }}
+          className="absolute top-[3px] w-4 h-4 rounded-full bg-jarvis-ink transition-all"
+          style={{
+            left: value ? 24 : 3,
+            background: value ? "#03101c" : "rgba(226,232,240,0.85)",
+          }}
         />
       </button>
     </label>
@@ -237,7 +273,7 @@ function ActionBtn({
     <button
       type="button"
       onClick={onClick}
-      className={`w-full text-left px-3 py-2 rounded-lg text-[11px] transition-all ${
+      className={`w-full text-left px-3 py-2.5 rounded-lg text-[11px] tracking-wide transition-all ${
         danger
           ? "text-jarvis-danger hover:bg-jarvis-danger/10"
           : accent
@@ -246,10 +282,10 @@ function ActionBtn({
       }`}
       style={{
         boxShadow: danger
-          ? "inset 0 0 0 1px rgba(251,113,133,0.28)"
+          ? "inset 0 0 0 1px rgba(251,113,133,0.3)"
           : accent
-            ? "inset 0 0 0 1px rgba(165,243,252,0.3)"
-            : "inset 0 0 0 1px rgba(125,211,252,0.14)",
+            ? "inset 0 0 0 1px rgba(165,243,252,0.32)"
+            : "inset 0 0 0 1px rgba(125,211,252,0.16)",
       }}
     >
       {label}
@@ -259,9 +295,9 @@ function ActionBtn({
 
 function KV({ k, v }: { k: string; v: string }) {
   return (
-    <div className="flex items-center justify-between gap-3 py-1 px-1 text-[11px]">
-      <span className="text-jarvis-ice/40">{k}</span>
-      <span className="text-jarvis-ice/90 truncate max-w-[62%] text-right" title={v}>{v}</span>
+    <div className="flex items-center justify-between gap-3 py-1.5 px-1 text-[11px]">
+      <span className="text-jarvis-ice/40 shrink-0">{k}</span>
+      <span className="text-jarvis-ice/90 truncate max-w-[64%] text-right text-mono text-[10px]" title={v}>{v}</span>
     </div>
   );
 }

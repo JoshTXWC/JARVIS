@@ -57,6 +57,11 @@ A:
       code to ...")
         → `agent_backend_run`.
 
+      Multi-step autonomous browser task ("fill this form", "compare prices
+      across sites", "walk through a signup flow", "do X on the web for me")
+        → `web_agent` (Gemini computer-use). Needs GEMINI_API_KEY.
+        → NOT for simple search — that is still `web_search`.
+
       Direct page fetch + summarise (deep read of a known URL)
         → `web_fetch` then `media_show` so the user can review inline.
 
@@ -141,12 +146,13 @@ model:
   # `model` and `api_key_env` to match your provider.
   # Set model to `auto` for Smart Auto — JARVIS picks a light/coding/tools
   # model per question from the curated switcher assortment.
-  # Cloud models in the switcher (Grok 4 / Grok 4 Fast) need XAI_API_KEY in .env
-  # and will hot-swap endpoint → https://api.x.ai/v1 when selected.
+  # Cloud models in the switcher:
+  #   Grok 4 / Grok 4 Fast  → XAI_API_KEY    → https://api.x.ai/v1
+  #   Gemini 2.5 Flash/Pro  → GEMINI_API_KEY → Google OpenAI-compatible route
   provider: openai_compatible
-  endpoint: http://localhost:11434/v1
-  model: gemma4:31b-cloud
-  api_key_env: OLLAMA_API_KEY
+  endpoint: https://generativelanguage.googleapis.com/v1beta/openai
+  model: gemini-pro-latest
+  api_key_env: GEMINI_API_KEY
   # Restored when leaving a cloud model via the switcher.
   local_endpoint: http://localhost:11434/v1
   local_api_key_env: OLLAMA_API_KEY
@@ -265,6 +271,7 @@ plugins:
   memory_tools:          { enabled: true }
   web_tools:             { enabled: true,  provider: duckduckgo }
   browser_tools:         { enabled: true }
+  web_agent_tools:       { enabled: true }
   agent_backend_tools:   { enabled: true }
   voice_tools_optional:  { enabled: true }
   vision_tools_optional: { enabled: true }

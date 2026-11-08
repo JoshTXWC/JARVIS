@@ -95,11 +95,9 @@ def create_app(
                     log.info("✓ FLUX preloaded")
             except Exception as e:  # noqa: BLE001
                 log.warning("FLUX preload failed: %s", e)
-            try:
-                await loop.run_in_executor(None, routes._get_whisper_model)
-                log.info("✓ Whisper preloaded")
-            except Exception as e:  # noqa: BLE001
-                log.warning("Whisper preload failed: %s", e)
+            # Whisper stays lazy — preloading pins a CPU model in RAM and
+            # burns cycles at idle for a feature that only runs on demand.
+            log.info("Whisper deferred (load on first STT request)")
             try:
                 if routes._should_try_piper(cfg):
                     await loop.run_in_executor(None, routes._synthesize_with_piper, "ready", cfg)

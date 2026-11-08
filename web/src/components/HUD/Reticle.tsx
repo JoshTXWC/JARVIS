@@ -2,6 +2,9 @@
  * TARGETING RETICLE — cursor follow with magnetic lock-on.
  * Snaps to buttons / inputs / chips within a radius and holds with
  * hysteresis so the frame doesn't flicker off edges.
+ *
+ * While locked, clicks activate the framed target even if the OS pointer
+ * is outside it. The system cursor is hidden — the reticle is the cursor.
  */
 import { useEffect, useRef, useState } from "react";
 
@@ -12,6 +15,7 @@ const SNAP_PX = 36;       // magnetic pull distance to edges
 const HOLD_PAD = 18;      // extra padding before unlock (hysteresis)
 const FRAME_PAD = 10;     // visual frame padding around target
 const FREE_SIZE = 28;
+const HUD_CURSOR_CLASS = "jarvis-reticle-hud";
 
 function distToRect(x: number, y: number, r: DOMRect): number {
   const dx = Math.max(r.left - x, 0, x - r.right);
@@ -27,7 +31,7 @@ function isVisible(el: HTMLElement): boolean {
 }
 
 function findLockTarget(x: number, y: number, sticky: HTMLElement | null): HTMLElement | null {
-  // Sticky hold — stay locked while cursor is near the previous target.
+  // Sticky hold — stay locked while pointer is near the previous target.
   if (sticky && document.contains(sticky) && isVisible(sticky)) {
     const r = sticky.getBoundingClientRect();
     const expanded = {
@@ -55,7 +59,6 @@ function findLockTarget(x: number, y: number, sticky: HTMLElement | null): HTMLE
   for (let i = 0; i < nodes.length; i++) {
     const el = nodes[i] as HTMLElement;
     if (!isVisible(el)) continue;
-    // Skip offscreen-ish
     const r = el.getBoundingClientRect();
     if (r.bottom < 0 || r.top > window.innerHeight || r.right < 0 || r.left > window.innerWidth) continue;
     const d = distToRect(x, y, r);
@@ -81,6 +84,20 @@ function targetLabel(el: HTMLElement): string {
     .slice(0, 28);
 }
 
+function activateLocked(target: HTMLElement) {
+  if (!document.contains(target)) return;
+  try {
+    if (typeof target.focus === "function") {
+      target.focus({ preventScroll: true });
+    }
+  } catch {
+    try { target.focus(); } catch { /* noop */ }
+  }
+  if (typeof target.click === "function") {
+    target.click();
+  }
+}
+
 export default function Reticle() {
   const ref = useRef<HTMLDivElement>(null);
   const stickyRef = useRef<HTMLElement | null>(null);
@@ -88,6 +105,14 @@ export default function Reticle() {
   const labelRef = useRef("");
   const [locked, setLocked] = useState(false);
   const [label, setLabel] = useState("");
+
+  // Hide the OS cursor for the whole HUD — reticle is the only pointer.
+  useEffect(() => {
+    document.documentElement.classList.add(HUD_CURSOR_CLASS);
+    return () => {
+      document.documentElement.classList.remove(HUD_CURSOR_CLASS);
+    };
+  }, []);
 
   useEffect(() => {
     let raf = 0;
@@ -147,9 +172,26 @@ export default function Reticle() {
       raf = requestAnimationFrame(paint);
     };
 
+    // If the reticle is framing a control, that control receives the click
+    // even when the OS pointer is outside its box (magnetic lock).
+    const onClickCapture = (e: MouseEvent) => {
+      // Never steal clicks while a floating tile is being dragged / carried.
+      if (document.body.dataset.jarvisDragging === "1") return;
+      const target = stickyRef.current;
+      if (!target || !lockedRef.current) return;
+      if (!document.contains(target)) return;
+      const src = e.target as Node | null;
+      if (src && target.contains(src)) return; // already hitting the locked control
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      activateLocked(target);
+    };
+
     window.addEventListener("mousemove", onMove, { passive: true });
+    window.addEventListener("click", onClickCapture, true);
     return () => {
       window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("click", onClickCapture, true);
       if (raf) cancelAnimationFrame(raf);
     };
   }, []);

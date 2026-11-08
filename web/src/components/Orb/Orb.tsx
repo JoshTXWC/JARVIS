@@ -32,11 +32,20 @@ const PALETTE: Record<OrbState, {
 export default function Orb() {
   const ref = useRef<HTMLDivElement>(null);
   const barehandsOpen = useStore((s) => s.barehandsOpen);
+  const barehandsEmbed = useStore((s) => s.barehandsEmbed);
+  const backgroundMode = useStore((s) => s.backgroundMode);
+  const setBackgroundMode = useStore((s) => s.setBackgroundMode);
+  // Corner for Neural view and fullscreen Barehands stage.
+  const cornered =
+    backgroundMode === "neural" || (barehandsOpen && !barehandsEmbed);
   const cur = useRef({ cyan: PALETTE.idle.cyan, glow: PALETTE.idle.glow, amber: PALETTE.idle.amber, speed: 1, intensity: 0.85, audio: 0 });
 
   useEffect(() => {
     let raf = 0;
-    const tick = () => {
+    let timer = 0;
+    let live = true;
+
+    const paint = () => {
       const st = useStore.getState();
       const t = PALETTE[st.orbState];
       const c = cur.current;
@@ -44,8 +53,6 @@ export default function Orb() {
       c.intensity += (t.intensity * (1 + st.audioLevel * 0.6) - c.intensity) * k;
       c.speed     += (t.speed - c.speed) * k;
       c.audio     += (st.audioLevel - c.audio) * k * 2;
-      // lerp hex colors via DOM CSS vars (we just snap when state changes —
-      // the CSS transition smooths it).
       c.cyan  = t.cyan;
       c.glow  = t.glow;
       c.amber = t.amber;
@@ -57,19 +64,56 @@ export default function Orb() {
         ref.current.style.setProperty("--orb-intensity", c.intensity.toFixed(3));
         ref.current.style.setProperty("--orb-audio", c.audio.toFixed(3));
       }
-      raf = requestAnimationFrame(tick);
     };
-    tick();
-    return () => cancelAnimationFrame(raf);
+
+    const stop = () => {
+      if (raf) cancelAnimationFrame(raf);
+      if (timer) window.clearTimeout(timer);
+      raf = 0;
+      timer = 0;
+    };
+
+    const schedule = () => {
+      if (!live || document.hidden) return;
+      const st = useStore.getState();
+      const active = st.orbState !== "idle" || st.audioLevel > 0.02;
+      paint();
+      if (active) {
+        raf = requestAnimationFrame(schedule);
+      } else {
+        // Idle: ~8fps is enough for soft lerp; saves a full compositor core.
+        timer = window.setTimeout(() => {
+          raf = requestAnimationFrame(schedule);
+        }, 120);
+      }
+    };
+
+    const onVis = () => {
+      stop();
+      if (!document.hidden) schedule();
+    };
+
+    schedule();
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      live = false;
+      stop();
+      document.removeEventListener("visibilitychange", onVis);
+    };
   }, []);
 
-  // Barehands mode: park a compact orb in the bottom-left corner above the stage.
-  const shellClass = barehandsOpen
-    ? "fixed bottom-4 left-4 z-[95] pointer-events-none flex items-end justify-start"
-    : "absolute inset-0 pointer-events-none flex items-center justify-center";
-  const dialClass = barehandsOpen
-    ? "relative w-[min(148px,22vw)] aspect-square transition-[width] duration-500 ease-out"
+  const shellClass = cornered
+    ? "fixed bottom-4 left-4 z-[95] flex items-end justify-start"
+    : "absolute inset-0 pointer-events-none flex items-center justify-center z-[5]";
+  const dialClass = cornered
+    ? "relative w-[min(148px,22vw)] aspect-square transition-[width] duration-500 ease-out pointer-events-auto cursor-pointer"
     : "relative w-[clamp(280px,38vmin,560px)] aspect-square transition-[width] duration-500 ease-out";
+
+  const onCornerActivate = () => {
+    if (backgroundMode === "neural" && !(barehandsOpen && !barehandsEmbed)) {
+      setBackgroundMode("orb");
+    }
+  };
 
   return (
     <div
@@ -85,17 +129,28 @@ export default function Orb() {
         ["--orb-audio" as any]: 0,
       }}
     >
-      <div className={dialClass}>
+      <div
+        className={dialClass}
+        onClick={cornered ? onCornerActivate : undefined}
+        title={
+          backgroundMode === "neural" && !(barehandsOpen && !barehandsEmbed)
+            ? "Return to orb background"
+            : undefined
+        }
+        role={
+          backgroundMode === "neural" && !(barehandsOpen && !barehandsEmbed)
+            ? "button"
+            : undefined
+        }
+      >
         {/* Volumetric blue halo — breathes + brightens with voice */}
         <div
           className="absolute inset-0 rounded-full"
           style={{
             background:
-              "radial-gradient(circle at center, color-mix(in srgb, var(--orb-glow) 28%, transparent) 0%, transparent 58%)",
-            filter: "blur(8px)",
+              "radial-gradient(circle at center, rgba(103,232,249,0.22) 0%, transparent 58%)",
             opacity: "calc(var(--orb-intensity) * 0.9 + var(--orb-audio) * 0.4)",
             transform: "scale(calc(1 + var(--orb-audio) * 0.18))",
-            transition: "background 0.6s ease",
           }}
         />
 
@@ -104,8 +159,9 @@ export default function Orb() {
           viewBox="-100 -100 200 200"
           className="absolute inset-0 w-full h-full"
           style={{
-            filter:
-              "drop-shadow(0 0 calc(6px + var(--orb-audio) * 9px) color-mix(in srgb, var(--orb-glow) 70%, transparent)) drop-shadow(0 0 calc(18px + var(--orb-audio) * 20px) color-mix(in srgb, var(--orb-glow) 35%, transparent))",
+            // Static glow — animated/filter-bound drop-shadows re-composite the
+            // whole dial every frame and peg the GPU while idling.
+            filter: "drop-shadow(0 0 10px rgba(103,232,249,0.35))",
           }}
         >
           <defs>

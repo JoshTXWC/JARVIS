@@ -7,7 +7,7 @@ export const HEADER_H = 72;      // brand + icon dock
 /** Slim strip for floating chrome controls. */
 export const FOOTER_H = 44;
 /** Top strip where releasing a tile docks it back into the icon menu. */
-export const DOCK_ZONE_H = 72;
+export const DOCK_ZONE_H = 88;
 
 export interface Bounds {
   left: number;
@@ -28,8 +28,21 @@ export function contentBounds(
   };
 }
 
-export function inDockZone(clientY: number): boolean {
-  return clientY <= DOCK_ZONE_H;
+/** True when the pointer is in the top dock strip or over the icon dock itself. */
+export function inDockZone(clientY: number, clientX?: number): boolean {
+  if (clientY <= DOCK_ZONE_H) return true;
+  const dock = typeof document !== "undefined"
+    ? document.getElementById("jarvis-icon-dock")
+    : null;
+  if (!dock || clientX == null) return false;
+  const r = dock.getBoundingClientRect();
+  const pad = 16;
+  return (
+    clientX >= r.left - pad &&
+    clientX <= r.right + pad &&
+    clientY >= r.top - pad &&
+    clientY <= r.bottom + pad
+  );
 }
 
 export function clampBox(

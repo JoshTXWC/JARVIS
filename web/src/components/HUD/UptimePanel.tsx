@@ -57,8 +57,8 @@ export default function UptimePanel() {
   }, [booted, connected, now, startedAt]);
 
   return (
-    <div className="holo-panel flex h-full flex-col overflow-hidden">
-      <div className="panel-header flex items-center justify-between px-3.5 py-2 shrink-0">
+    <div className="holo-panel flex w-full flex-col overflow-hidden">
+      <div className="panel-header flex items-center justify-between px-3 py-2 shrink-0">
         <div className="flex items-center gap-2 min-w-0">
           <span className="relative flex h-1.5 w-1.5 shrink-0">
             <span className="absolute inline-flex h-full w-full rounded-full bg-jarvis-aqua opacity-40 animate-ping" />
@@ -71,12 +71,12 @@ export default function UptimePanel() {
         <span className="glass-chip">{snapshot.source}</span>
       </div>
 
-      <div className="flex min-h-0 flex-1 flex-col justify-between gap-3 p-3 text-mono">
+      <div className="flex flex-col gap-3 p-3 text-mono">
         <div>
           <div className="text-[9px] uppercase tracking-[0.28em] text-jarvis-cyan/45">
             online duration
           </div>
-          <div className="mt-1 text-[24px] leading-none text-jarvis-ice tabular-nums glow-text">
+          <div className="mt-1 text-[22px] leading-none text-jarvis-ice tabular-nums glow-text">
             {snapshot.uptime}
           </div>
         </div>

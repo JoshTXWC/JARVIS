@@ -1,16 +1,10 @@
 /**
- * Ambient world chrome. Minimal corner accents, soft scan beam, ghost grid.
- * Everything pointer-events-none. Purely atmospheric.
+ * Ambient world chrome — soft scan beam + ghost grid + vignette.
+ * Corner L-brackets removed (they read as dark boxes on the edges).
  */
 export default function CornerFrame() {
   return (
     <div className="absolute inset-0 pointer-events-none z-30 overflow-hidden">
-      {/* Whisper-thin corner accents */}
-      <Corner position="tl" />
-      <Corner position="tr" />
-      <Corner position="bl" />
-      <Corner position="br" />
-
       {/* Soft drifting scan beam */}
       <div className="absolute left-0 right-0 animate-scan">
         <div className="scanline" />
@@ -28,23 +22,5 @@ export default function CornerFrame() {
         }}
       />
     </div>
-  );
-}
-
-function Corner({ position }: { position: "tl" | "tr" | "bl" | "br" }) {
-  const map = {
-    tl: "top-4 left-4 border-l border-t rounded-tl-lg",
-    tr: "top-4 right-4 border-r border-t rounded-tr-lg",
-    bl: "bottom-4 left-4 border-l border-b rounded-bl-lg",
-    br: "bottom-4 right-4 border-r border-b rounded-br-lg",
-  } as const;
-  return (
-    <div
-      className={`absolute w-10 h-10 ${map[position]}`}
-      style={{
-        borderColor: "rgba(186,230,253,0.35)",
-        boxShadow: "0 0 18px -4px rgba(125,211,252,0.35)",
-      }}
-    />
   );
 }

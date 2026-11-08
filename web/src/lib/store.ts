@@ -178,6 +178,7 @@ interface StoreState {
   // chat
   chat: ChatEntry[];
   pushChat: (e: ChatEntry) => void;
+  dropChat: (id: string) => void;
   clearChat: () => void;
   appendChatText: (id: string, piece: string) => void;
   finalizeChat: (id: string, text?: string) => void;
@@ -267,6 +268,9 @@ interface StoreState {
   // True while a dockable tile is dragged over the top dock zone.
   dockHot: boolean;
   setDockHot: (v: boolean) => void;
+  /** Ignore dock-icon undocks until this timestamp (gesture drop cooldown). */
+  dockDropLockUntil: number;
+  armDockDropLock: (ms?: number) => void;
   // Legacy aliases used by older restore paths.
   hiddenPanels: string[];
   hidePanel: (id: string) => void;
@@ -282,8 +286,24 @@ interface StoreState {
   barehandsOpen: boolean;
   barehandsUrl: string;
   barehandsBusy: boolean;
-  setBarehandsOpen: (open: boolean, url?: string) => void;
+  /** Dashboard embed: glass cards over HUD, no Barehands ring, keep JARVIS orb. */
+  barehandsEmbed: boolean;
+  setBarehandsOpen: (open: boolean, url?: string, opts?: { embed?: boolean }) => void;
   setBarehandsBusy: (v: boolean) => void;
+  // Unified Hands = gestures + optional barehands embed on the dashboard.
+  gestureEnabled: boolean;
+  setGestureEnabled: (v: boolean) => void;
+  gestureStatus: string;
+  setGestureStatus: (v: string) => void;
+  /** Webcam preview: side PiP (gestures-style) or full-screen dimmed feed. */
+  handsCamMode: "pip" | "fullscreen";
+  setHandsCamMode: (m: "pip" | "fullscreen") => void;
+  /** Show webcam under HUD while Hands is on (off = landmark nodes only). */
+  handsShowCam: boolean;
+  setHandsShowCam: (v: boolean) => void;
+  // World background: classic centered orb vs interactive neural cloud.
+  backgroundMode: "orb" | "neural";
+  setBackgroundMode: (m: "orb" | "neural") => void;
 }
 
 let _id = 0;
@@ -328,6 +348,7 @@ export const useStore = create<StoreState>()(persist((set) => ({
       if (isBootGreeting(e) && st.chat.some(isBootGreeting)) return {};
       return { chat: [...st.chat, e].slice(-400) };
     }),
+  dropChat: (id) => set((st) => ({ chat: st.chat.filter((c) => c.id !== id) })),
   clearChat: () => set({ chat: [] }),
   appendChatText: (id, piece) =>
     set((st) => ({
@@ -441,6 +462,8 @@ export const useStore = create<StoreState>()(persist((set) => ({
   clearDockedPanels: () => set({ dockedPanels: [], dockHot: false }),
   dockHot: false,
   setDockHot: (v) => set({ dockHot: v }),
+  dockDropLockUntil: 0,
+  armDockDropLock: (ms = 750) => set({ dockDropLockUntil: Date.now() + ms }),
   // Legacy: map hide/show onto dock
   hiddenPanels: [],
   hidePanel: (id) =>
@@ -521,20 +544,44 @@ export const useStore = create<StoreState>()(persist((set) => ({
   barehandsOpen: false,
   barehandsUrl: "http://127.0.0.1:8794/stage.html",
   barehandsBusy: false,
-  setBarehandsOpen: (open, url) =>
+  barehandsEmbed: false,
+  setBarehandsOpen: (open, url, opts) =>
     set((st) => ({
       barehandsOpen: open,
       barehandsUrl: url || st.barehandsUrl,
+      barehandsEmbed: open ? !!opts?.embed : false,
       barehandsBusy: false,
     })),
   setBarehandsBusy: (v) => set({ barehandsBusy: v }),
+  gestureEnabled: false,
+  setGestureEnabled: (v) => set({ gestureEnabled: v }),
+  gestureStatus: "",
+  setGestureStatus: (v) => set({ gestureStatus: v }),
+  handsCamMode: "pip",
+  setHandsCamMode: (m) => set({ handsCamMode: m }),
+  handsShowCam: true,
+  setHandsShowCam: (v) => set({ handsShowCam: v }),
+  backgroundMode: "orb",
+  setBackgroundMode: (m) => set({ backgroundMode: m }),
 }), {
   // Persist only durable, user-meaningful slices. Ephemeral runtime state
   // (orb, audio levels, mic flags, transient overlays, attachments) lives
   // in memory only so refresh starts clean.
   name: "jarvis.store.v1",
-  version: 1,
+  version: 3,
   storage: createJSONStorage(() => localStorage),
+  migrate: (persisted, version) => {
+    const p = (persisted || {}) as Record<string, unknown>;
+    // v2: dashboard defaults to chat-only (everything else docked).
+    // v3: chat fused into Dialogue — force core tiles back into the dock.
+    if (version < 3) {
+      p.dockedPanels = [...DEFAULT_DOCKED];
+    }
+    if (p.backgroundMode !== "orb" && p.backgroundMode !== "neural") {
+      p.backgroundMode = "orb";
+    }
+    return p as typeof persisted;
+  },
   partialize: (state) => ({
     chat:         state.chat,
     media:        state.media,
@@ -544,6 +591,10 @@ export const useStore = create<StoreState>()(persist((set) => ({
     bargeIn:      state.bargeIn,
     wakeEnabled:  state.wakeEnabled,
     dockedPanels: state.dockedPanels,
+    gestureEnabled: state.gestureEnabled,
+    handsCamMode: state.handsCamMode,
+    handsShowCam: state.handsShowCam,
+    backgroundMode: state.backgroundMode,
   }),
   // After rehydrate, mark streaming chats as finalised (their stream never
   // resumes across a reload) and strip the lightbox/reader overlays.
@@ -558,6 +609,16 @@ export const useStore = create<StoreState>()(persist((set) => ({
       state.dockedPanels = [...anyState.hiddenPanels];
     }
     if (!state.dockedPanels) state.dockedPanels = [...DEFAULT_DOCKED];
+    // Drop legacy / retired dock ids (chat fused into Dialogue; mission removed).
+    const retired = new Set(["chat", "mission"]);
+    state.dockedPanels = state.dockedPanels.filter((id) => !retired.has(id));
+    // Reintroduce Terminal for ops / brain errors if an older session dropped it.
+    if (!state.dockedPanels.includes("terminal")) {
+      state.dockedPanels = [...state.dockedPanels, "terminal"];
+    }
+    if (state.backgroundMode !== "orb" && state.backgroundMode !== "neural") {
+      state.backgroundMode = "orb";
+    }
     // Cold launch (reboot / app relaunch) vs in-app reload. No alive marker ⇒
     // fresh process ⇒ don't auto-reopen the prior session; stash it for an
     // on-demand restore and start clean. A reload keeps the marker and the

@@ -20,7 +20,7 @@ from ..agents.base import Agent
 from ..config import Config
 from ..plugins.base import Tool
 from ..plugins.registry import PluginRegistry
-from .brain import BrainReply, LLMBrain, ToolCall
+from .brain import BrainReply, LLMBrain, ToolCall, is_brain_error_text
 from .events import Event, EventKind
 from .task_progress import set_reporter
 from .hooks import HookRegistry
@@ -672,12 +672,24 @@ class Orchestrator:
                     yield Event(EventKind.STREAM_END)
 
             assistant_text = clean_assistant_text(reply.text)
+            # Brain transport failures must never enter chat/TTS — terminal only.
+            if is_brain_error_text(assistant_text) and not reply.tool_calls:
+                log.error("%s", assistant_text)
+                yield Event(EventKind.ERROR, text=assistant_text)
+                yield Event(EventKind.DONE)
+                return
+
             if not reply.tool_calls and is_malformed_reply(assistant_text, user_text):
                 reply, assistant_text = await self._repair_malformed_reply(
                     messages=messages,
                     reply=reply,
                     user_text=user_text,
                 )
+                if is_brain_error_text(assistant_text):
+                    log.error("%s", assistant_text)
+                    yield Event(EventKind.ERROR, text=assistant_text)
+                    yield Event(EventKind.DONE)
+                    return
 
             if assistant_text and not reply.tool_calls:
                 # FOLLOW-THROUGH GUARD: did the model promise an action

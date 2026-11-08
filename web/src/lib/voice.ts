@@ -6,6 +6,7 @@
 import { useStore, type VoiceProfile } from "./store";
 import { getHealth } from "./api";
 import { detectWake, stripWakeWord, normalizeWakeWord } from "./wakeWord";
+import { wsClient } from "./ws";
 
 function configuredWakeWord(): string {
   return normalizeWakeWord(useStore.getState().health?.voice?.wake_word);
@@ -480,19 +481,16 @@ const MAX_RECORDING_MS    = 8_000;     // force-flush clips longer than this
 const BASELINE_WINDOW_MS  = 1_000;     // learn ambient noise level over 1 s
 const BASELINE_MULTIPLIER = 1.8;       // require lvl > baseline * mult to count as voice
 
-// ── Speak-time cancel ("mute mic except cancel") ────────────────────────────
-// While JARVIS is speaking the mic is muted to normal commands — VAD is paused
-// so we never transcribe ambient talk or our own TTS. We keep ONE ear open for
-// a stop word: a sustained, clearly-louder-than-ambient voice (echo residue
-// won't survive the sustain window) triggers a short "cancel-probe" recording.
-// That probe is checked ONLY for "cancel"/"stop" — TTS keeps playing unless a
-// stop word is actually heard. Probe audio is NEVER submitted as a chat.
-const BARGE_IN_MULTIPLIER = 3.2;       // voice must exceed baseline * this
-const BARGE_IN_FLOOR      = 0.12;      // and clear this absolute level
-const BARGE_IN_SUSTAIN_MS = 220;       // for this long, continuously
-// Stop words that cut TTS when heard during a cancel-probe.
+// ── Speak-time barge-in (interruptible voice) ───────────────────────────────
+// While JARVIS is speaking, VAD for normal chat is paused so we don't loop on
+// our own TTS. With barge-in ON, a sustained louder-than-ambient voice cuts
+// TTS immediately, cancels the in-flight turn, and starts a normal recording
+// that is submitted as the next command — so you can talk over JARVIS.
+// Stop-only phrases just silence him without sending a new chat.
+const BARGE_IN_MULTIPLIER = 2.6;       // voice must exceed baseline * this
+const BARGE_IN_FLOOR      = 0.09;      // and clear this absolute level
+const BARGE_IN_SUSTAIN_MS = 160;       // for this long, continuously
 const CANCEL_RE = /\b(?:cancel|nevermind|never\s*mind|shut\s*up|stop(?:\s+(?:talking|speaking))?|be\s+quiet|quiet|enough|hush)\b/i;
-const CANCEL_PROBE_MS = 1600;          // how long to listen for the stop word
 
 // Whisper hallucinations to suppress (mirror of server filter).
 const HALLUCINATION_RE = /^\s*(?:thanks?[\s,.!?]*(?:for\s+watching|for\s+listening)?[\s,.!?]*(?:everyone|guys|all)?[\s,.!?]*|thank\s+you[\s,.!?]*(?:for\s+watching|for\s+listening|so\s+much)?[\s,.!?]*|(?:please\s+)?(?:like\s*(?:and\s+)?)?subscribe[\s,.!?]*(?:to\s+my\s+channel)?[\s,.!?]*|bye(?:\s*bye)?[\s,.!?]*|goodbye[\s,.!?]*|(?:see|catch)\s+you\s+(?:later|next\s+time)[\s,.!?]*|you[\s,.!?]*|[.!?,…\s♪♫]+)\s*$/i;
@@ -534,10 +532,9 @@ export class JarvisMic {
   private _coalesceTimer: ReturnType<typeof setTimeout> | null = null;
   // Wake-word gate
   private _awakeUntil = 0;        // unix ms; while now < this, accept everything
-  private _ttsActive = false;     // JARVIS is talking — mic muted except "cancel"
+  private _ttsActive = false;     // JARVIS is talking — mic muted except barge-in
   private _loudRunStart = 0;      // unix ms the current loud-while-speaking run began
-  private _recordingIsProbe = false;  // current capture is a cancel-probe (never submit)
-  private _probeTimer: ReturnType<typeof setTimeout> | null = null;
+  private _recordingIsProbe = false;  // legacy flag (unused for submit path)
 
   // Called from voice.speak() when TTS begins / ends.
   onTtsStart() {
@@ -549,7 +546,7 @@ export class JarvisMic {
       useStore.getState().setMicMode("speaking");
       useStore.getState().setMicStatus(
         useStore.getState().bargeIn
-          ? "JARVIS speaking · say “cancel” to stop"
+          ? "JARVIS speaking · talk to interrupt"
           : "JARVIS speaking · mic muted",
       );
     }
@@ -558,8 +555,6 @@ export class JarvisMic {
   onTtsEnd() {
     this._ttsActive = false;
     this._loudRunStart = 0;
-    // Tear down any cancel-probe still in flight; its audio must never submit.
-    if (this._probeTimer) { clearTimeout(this._probeTimer); this._probeTimer = null; }
     if (this.isRecording) this._stopRecording();
     // After JARVIS finishes, arm a generous follow-up window so the user
     // can reply naturally — no second wake word needed.
@@ -570,23 +565,19 @@ export class JarvisMic {
     }
   }
 
-  // The user spoke up while JARVIS is talking. Start a brief recording that is
-  // checked ONLY for a stop word — TTS keeps playing meanwhile. If no stop word
-  // is heard the audio is discarded; it is never submitted as a chat.
-  private _startCancelProbe() {
+  // True barge-in: cut TTS + cancel the turn, then record the user's next command.
+  private _startBargeIn() {
     this._loudRunStart = 0;
     if (this.isRecording || this._transcribing) return;
-    console.log("[STT] loud voice while speaking — cancel-probe armed");
+    console.log("[STT] barge-in — cutting TTS and listening for command");
+    cancelStreamingTts();
+    try { wsClient.cancel(); } catch { /* noop */ }
+    this._ttsActive = false;
+    this._awakeUntil = Date.now() + FOLLOWUP_WAKE_MS;
+    useStore.getState().setMicMode("armed");
+    useStore.getState().setOrb("listening");
+    useStore.getState().setMicStatus("interrupted · listening…");
     this._startRecording();
-    this._recordingIsProbe = true;
-    if (this._probeTimer) clearTimeout(this._probeTimer);
-    this._probeTimer = setTimeout(() => {
-      this._probeTimer = null;
-      this._stopRecording();
-    }, CANCEL_PROBE_MS);
-    if (this._wantListening) {
-      useStore.getState().setMicStatus("listening for “cancel”…");
-    }
   }
 
   available(): boolean {
@@ -610,8 +601,6 @@ export class JarvisMic {
     // submission can't fire after the mic is stopped.
     if (this._coalesceTimer) { clearTimeout(this._coalesceTimer); this._coalesceTimer = null; }
     this._coalesceBuf = [];
-    // Tear down a cancel-probe if one is running.
-    if (this._probeTimer) { clearTimeout(this._probeTimer); this._probeTimer = null; }
     this._recordingIsProbe = false;
     this._loudRunStart = 0;
     this._stopRecording();
@@ -721,10 +710,8 @@ export class JarvisMic {
           this._stopRecording();
         }
       } else if (useStore.getState().bargeIn) {
-        // JARVIS is speaking; mic is muted to normal commands. Keep one ear
-        // open for a stop word: a sustained, clearly-louder-than-ambient voice
-        // (transient echo residue won't survive the sustain window) arms a
-        // short cancel-probe. TTS keeps playing unless the probe hears "cancel".
+        // JARVIS is speaking. Sustained louder-than-ambient voice = barge-in:
+        // cut TTS and capture the user's next command.
         const loudThr = Math.max(BARGE_IN_FLOOR, this.baselineLvl * BARGE_IN_MULTIPLIER);
         if (lvl > loudThr) {
           if (!this._loudRunStart) {
@@ -733,7 +720,7 @@ export class JarvisMic {
             Date.now() - this._loudRunStart > BARGE_IN_SUSTAIN_MS &&
             !this.isRecording && !this._transcribing
           ) {
-            this._startCancelProbe();
+            this._startBargeIn();
           }
         } else {
           this._loudRunStart = 0;
@@ -747,7 +734,6 @@ export class JarvisMic {
 
   private _startRecording() {
     if (!this.stream || this.isRecording) return;
-    // Default: a normal capture. _startCancelProbe() flips this true after.
     this._recordingIsProbe = false;
 
     const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
@@ -769,12 +755,10 @@ export class JarvisMic {
     };
     this.recorder.onstop = () => {
       const duration = Date.now() - this.recordingStartTime;
-      // Snapshot probe-ness now — onTtsEnd may clear it before transcription.
-      const wasProbe = this._recordingIsProbe;
       this._recordingIsProbe = false;
       if (duration >= MIN_RECORDING_MS && this.chunks.length > 0) {
         const blob = new Blob(this.chunks, { type: this.recorder?.mimeType || "audio/webm" });
-        this._transcribe(blob, wasProbe);
+        this._transcribe(blob);
       }
       this.chunks = [];
     };
@@ -798,11 +782,11 @@ export class JarvisMic {
     this.recorder = null;
   }
 
-  private async _transcribe(blob: Blob, isCancelProbe = false) {
+  private async _transcribe(blob: Blob) {
     if (this._transcribing) return;
     this._transcribing = true;
-    useStore.getState().setMicStatus(isCancelProbe ? "listening for “cancel”…" : "transcribing…");
-    console.log("[STT] sending", blob.size, "bytes for transcription", isCancelProbe ? "(cancel-probe)" : "");
+    useStore.getState().setMicStatus("transcribing…");
+    console.log("[STT] sending", blob.size, "bytes for transcription");
 
     try {
       const form = new FormData();
@@ -812,23 +796,6 @@ export class JarvisMic {
       const result = await resp.json();
 
       console.log("[STT] result:", result);
-
-      // Cancel-probe: user spoke up while JARVIS was talking. ONLY a stop word
-      // does anything here — this audio is never forwarded to the chat.
-      if (isCancelProbe) {
-        const probe = (result?.text || "").trim();
-        if (probe && CANCEL_RE.test(probe)) {
-          console.log("[STT] cancel word while speaking — cutting TTS:", probe);
-          cancelStreamingTts();
-          this._ttsActive = false;
-          this._loudRunStart = 0;
-          this._awakeUntil = Date.now() + FOLLOWUP_WAKE_MS;
-          useStore.getState().setMicMode("armed");
-        } else {
-          console.log("[STT] cancel-probe, no stop word — ignoring:", probe || "(empty)");
-        }
-        return;   // probe audio is never submitted
-      }
 
       if (result.text && this._onTranscript) {
         const text = result.text.trim();
@@ -843,6 +810,18 @@ export class JarvisMic {
         // ambient "oh" in the armed window cancels whatever JARVIS is running.
         if (FILLER_RE.test(text)) {
           console.log("[STT] ignored filler:", text);
+          return;
+        }
+
+        // Stop-only phrases: silence JARVIS / stay armed, no new chat.
+        if (CANCEL_RE.test(text) && text.replace(CANCEL_RE, "").replace(/[\s,.!?]+/g, "").length < 3) {
+          console.log("[STT] stop phrase — silenced:", text);
+          cancelStreamingTts();
+          try { wsClient.cancel(); } catch { /* noop */ }
+          this._ttsActive = false;
+          this._awakeUntil = Date.now() + FOLLOWUP_WAKE_MS;
+          useStore.getState().setMicMode("armed");
+          useStore.getState().setMicStatus("silenced · awaiting command");
           return;
         }
 
@@ -894,12 +873,10 @@ export class JarvisMic {
     } finally {
       this._transcribing = false;
       if (this._wantListening) {
-        // If JARVIS is still speaking (probe didn't cancel), restore the
-        // speaking status rather than the idle listening prompt.
         if (this._ttsActive) {
           useStore.getState().setMicStatus(
             useStore.getState().bargeIn
-              ? "JARVIS speaking · say “cancel” to stop"
+              ? "JARVIS speaking · talk to interrupt"
               : "JARVIS speaking · mic muted",
           );
         } else {
