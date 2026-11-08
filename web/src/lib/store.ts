@@ -42,6 +42,8 @@ export interface ConfirmRequest {
   permission: "safe" | "caution" | "dangerous";
   preview: string;
   args: Record<string, unknown>;
+  /** Single-use approval grant from the backend (not persisted). */
+  token?: string;
 }
 
 export interface SystemStats {
@@ -301,6 +303,21 @@ interface StoreState {
   /** Show webcam under HUD while Hands is on (off = landmark nodes only). */
   handsShowCam: boolean;
   setHandsShowCam: (v: boolean) => void;
+  // Barehands 2.0 — system-wide desktop control (opt-in, off by default).
+  desktopControlEnabled: boolean;
+  setDesktopControlEnabled: (v: boolean) => void;
+  desktopControlMode: "hud" | "precision" | "spatial";
+  setDesktopControlMode: (m: "hud" | "precision" | "spatial") => void;
+  desktopOverlayEnabled: boolean;
+  setDesktopOverlayEnabled: (v: boolean) => void;
+  desktopVizMode: "skeleton" | "minimal" | "hidden";
+  setDesktopVizMode: (m: "skeleton" | "minimal" | "hidden") => void;
+  desktopPaused: boolean;
+  setDesktopPaused: (v: boolean) => void;
+  desktopGesture: string;
+  setDesktopGesture: (v: string) => void;
+  desktopCalibrating: boolean;
+  setDesktopCalibrating: (v: boolean) => void;
   // World background: classic centered orb vs interactive neural cloud.
   backgroundMode: "orb" | "neural";
   setBackgroundMode: (m: "orb" | "neural") => void;
@@ -561,6 +578,20 @@ export const useStore = create<StoreState>()(persist((set) => ({
   setHandsCamMode: (m) => set({ handsCamMode: m }),
   handsShowCam: true,
   setHandsShowCam: (v) => set({ handsShowCam: v }),
+  desktopControlEnabled: false,
+  setDesktopControlEnabled: (v) => set({ desktopControlEnabled: v }),
+  desktopControlMode: "hud",
+  setDesktopControlMode: (m) => set({ desktopControlMode: m }),
+  desktopOverlayEnabled: true,
+  setDesktopOverlayEnabled: (v) => set({ desktopOverlayEnabled: v }),
+  desktopVizMode: "skeleton",
+  setDesktopVizMode: (m) => set({ desktopVizMode: m }),
+  desktopPaused: false,
+  setDesktopPaused: (v) => set({ desktopPaused: v }),
+  desktopGesture: "",
+  setDesktopGesture: (v) => set({ desktopGesture: v }),
+  desktopCalibrating: false,
+  setDesktopCalibrating: (v) => set({ desktopCalibrating: v }),
   backgroundMode: "orb",
   setBackgroundMode: (m) => set({ backgroundMode: m }),
 }), {
@@ -594,6 +625,10 @@ export const useStore = create<StoreState>()(persist((set) => ({
     gestureEnabled: state.gestureEnabled,
     handsCamMode: state.handsCamMode,
     handsShowCam: state.handsShowCam,
+    // Persist preference flags only — never auto-enable injection on boot.
+    desktopControlMode: state.desktopControlMode,
+    desktopOverlayEnabled: state.desktopOverlayEnabled,
+    desktopVizMode: state.desktopVizMode,
     backgroundMode: state.backgroundMode,
   }),
   // After rehydrate, mark streaming chats as finalised (their stream never
@@ -615,6 +650,12 @@ export const useStore = create<StoreState>()(persist((set) => ({
     // Reintroduce Terminal for ops / brain errors if an older session dropped it.
     if (!state.dockedPanels.includes("terminal")) {
       state.dockedPanels = [...state.dockedPanels, "terminal"];
+    }
+    // Wave 2/3 panels — start docked for existing sessions that lack them.
+    for (const id of ["tools", "tasks", "workspace"] as const) {
+      if (!state.dockedPanels.includes(id)) {
+        state.dockedPanels = [...state.dockedPanels, id];
+      }
     }
     if (state.backgroundMode !== "orb" && state.backgroundMode !== "neural") {
       state.backgroundMode = "orb";

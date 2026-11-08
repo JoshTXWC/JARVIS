@@ -3,8 +3,11 @@
  */
 import { useEffect, useState } from "react";
 import { useStore } from "../../lib/store";
+import { apiFetch } from "../../lib/session";
 import { startWakeListening, stopWakeListening } from "../../lib/wakeMic";
 import { resetAllLayouts } from "./Floating";
+import DesktopControlSettings from "./DesktopControlSettings";
+import SecurityPanel from "./SecurityPanel";
 
 export default function Settings() {
   const health = useStore((s) => s.health);
@@ -27,7 +30,7 @@ export default function Settings() {
 
   const [agents, setAgents] = useState<string[]>([]);
   useEffect(() => {
-    fetch("/api/agents")
+    apiFetch("/api/agents")
       .then((r) => r.json())
       .then((j) => setAgents(j?.agents || []))
       .catch(() => undefined);
@@ -39,7 +42,7 @@ export default function Settings() {
     clearMedia();
     clearTools();
     setReader(null);
-    try { await fetch("/api/cleanslate", { method: "POST" }); } catch { /* noop */ }
+    try { await apiFetch("/api/cleanslate", { method: "POST" }); } catch { /* noop */ }
   };
 
   const modelName = health?.model.model || "—";
@@ -100,6 +103,10 @@ export default function Settings() {
           </Panel>
         )}
 
+        <Panel title="Security">
+          <SecurityPanel />
+        </Panel>
+
         <Panel title="Voice & input">
           <ToggleRow
             label="Speak aloud"
@@ -128,6 +135,10 @@ export default function Settings() {
             value={gestureEnabled}
             onChange={setGestureEnabled}
           />
+        </Panel>
+
+        <Panel title="Barehands Desktop Control">
+          <DesktopControlSettings />
         </Panel>
 
         <Panel title="Layout">

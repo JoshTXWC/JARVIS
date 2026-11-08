@@ -15,11 +15,15 @@ import TopBar from "./components/HUD/TopBar";
 import BarehandsOverlay from "./components/HUD/BarehandsOverlay";
 import GestureOverlay from "./components/HUD/GestureOverlay";
 import SystemLog from "./components/HUD/SystemLog";
+import TaskManager from "./components/HUD/TaskManager";
 import UptimePanel from "./components/HUD/UptimePanel";
+import WorkspacePanel from "./components/HUD/WorkspacePanel";
 import MediaHub from "./components/Media/MediaHub";
 import Orb from "./components/Orb/Orb";
 import ConfirmModal from "./components/Tools/ConfirmModal";
 import ToolFeed from "./components/Tools/ToolFeed";
+import ToolsPanel from "./components/Tools/ToolsPanel";
+import CommandPalette from "./components/HUD/CommandPalette";
 
 // Heavy components: split into separate chunks so they only load when needed.
 // Saves ~30% of the initial JS payload (notably Three.js + react-three-fiber
@@ -65,6 +69,9 @@ function defaults() {
     swarm:       { x: 340,  y: 80,  w: 360, h: 320 },
     plan:        { x: 340,  y: 80,  w: 360, h: 300 },
     settings:    { x: Math.max(M, (W - 420) / 2), y: TOP + 40, w: 420, h: Math.min(640, H - TOP - BOTTOM - 48) },
+    tools:       { x: M + 8, y: TOP + 40, w: 420, h: Math.min(560, H - TOP - BOTTOM - 48) },
+    tasks:       { x: M + 40, y: TOP + 80, w: 360, h: 420 },
+    workspace:   { x: Math.max(M, (W - 440) / 2), y: TOP + 60, w: 440, h: 480 },
     reader:      { x: 480,  y: 140, w: 720, h: 640 },
     images:      { x: 380,  y: 120, w: 640, h: 480 },
     videos:      { x: 420,  y: 160, w: 680, h: 460 },
@@ -120,6 +127,57 @@ export default function App() {
     }, 15_000);
     return () => clearInterval(id);
   }, [setHealth]);
+
+  // Barehands 2.0 — overlay chip + global shortcuts (Electron IPC).
+  useEffect(() => {
+    const cycleMode = () => {
+      const st = useStore.getState();
+      const order = ["hud", "precision", "spatial"] as const;
+      const i = order.indexOf(st.desktopControlMode);
+      const next = order[(i + 1) % order.length];
+      st.setDesktopControlMode(next);
+      wsClient.send({ type: "desktop_control", action: "mode", mode: next });
+      window.jarvis?.send?.("jarvis:desktop-overlay-meta", { mode: next });
+    };
+    const onOverlayAction = (payload: any) => {
+      const action = payload?.action;
+      const st = useStore.getState();
+      if (action === "toggle-pause") {
+        const paused = typeof payload?.paused === "boolean" ? payload.paused : !st.desktopPaused;
+        st.setDesktopPaused(paused);
+        wsClient.send({ type: "desktop_control", action: "pause", paused });
+      } else if (action === "cycle-mode") {
+        cycleMode();
+      }
+    };
+    const onEmergency = () => {
+      useStore.getState().setDesktopPaused(true);
+      wsClient.send({ type: "desktop_control", action: "emergency_stop" });
+      wsClient.killSwitch();
+    };
+    const onJarvisAction = (ev: Event) => {
+      const action = (ev as CustomEvent).detail?.action as string | undefined;
+      const st = useStore.getState();
+      if (action === "open_jarvis") window.jarvis?.send?.("jarvis:show");
+      else if (action === "open_settings") st.undockPanel("settings");
+      else if (action === "open_tools") st.undockPanel("tools");
+      else if (action === "open_diagnostics") st.undockPanel("diag");
+      else if (action === "open_workspace") st.undockPanel("workspace");
+      else if (action === "activate_voice") {
+        void startWakeListening();
+      } else if (action === "open_command_palette") {
+        window.dispatchEvent(new CustomEvent("jarvis:open-command-palette"));
+      }
+    };
+    const offAction = window.jarvis?.on?.("jarvis:desktop-overlay-action", onOverlayAction);
+    const offStop = window.jarvis?.on?.("jarvis:desktop-emergency-stop", onEmergency);
+    window.addEventListener("jarvis:desktop-action", onJarvisAction);
+    return () => {
+      offAction?.();
+      offStop?.();
+      window.removeEventListener("jarvis:desktop-action", onJarvisAction);
+    };
+  }, []);
 
   // Resume wake listening after reload if the user left it enabled.
   // Settings used to flip the flag without starting the mic — this heals that.
@@ -277,6 +335,7 @@ export default function App() {
           <ArticleReader />
         </Suspense>
         <ConfirmModal />
+        <CommandPalette />
         <DropZone />
         <BootSequence />
         <BarehandsOverlay />
@@ -390,6 +449,21 @@ export default function App() {
           <Settings />
         </Floating>
       )}
+      {visible("tools") && (
+        <Floating id="tools" defaultBox={D.tools} minW={340} minH={380} z={27}>
+          <ToolsPanel />
+        </Floating>
+      )}
+      {visible("tasks") && (
+        <Floating id="tasks" defaultBox={D.tasks} minW={300} minH={320} z={27}>
+          <TaskManager />
+        </Floating>
+      )}
+      {visible("workspace") && (
+        <Floating id="workspace" defaultBox={D.workspace} minW={360} minH={360} z={27}>
+          <WorkspacePanel />
+        </Floating>
+      )}
       <PinnedReader defaultBox={D.reader} />
 
       {/* Media hubs — appear only when they have content */}
@@ -445,6 +519,7 @@ export default function App() {
         <ArticleReader />
       </Suspense>
       <ConfirmModal />
+      <CommandPalette />
       <DropZone />
       <BootSequence />
       <BarehandsOverlay />

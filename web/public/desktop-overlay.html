@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>JARVIS Hands Overlay</title>
+  <link rel="stylesheet" href="/desktop-overlay.css" />
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div id="chip">
+    <div class="row">
+      <span class="label">Mode</span>
+      <span class="value" id="mode">HUD</span>
+    </div>
+    <div class="row" style="margin-top:6px">
+      <span class="label">Track</span>
+      <span class="row" style="gap:6px">
+        <span class="cam" id="cam"></span>
+        <span class="value" id="gesture">idle</span>
+      </span>
+    </div>
+    <div class="btns">
+      <button type="button" id="pauseBtn">Pause</button>
+      <button type="button" id="modeBtn">Mode</button>
+      <button type="button" id="hideBtn">Hide</button>
+    </div>
+  </div>
+  <button type="button" id="collapsed" title="Expand hands overlay">&#9995;</button>
+  <script src="/desktop-overlay.js"></script>
+</body>
+</html>

@@ -5,6 +5,11 @@
  * Pinch=click · fist=drag · two hands=scale.
  */
 import { useEffect, useRef } from "react";
+import {
+  packLandmarks,
+  publishHandsFrame,
+  requestDesktopOverlay,
+} from "../../lib/hands/desktopBridge";
 import { useStore } from "../../lib/store";
 
 const PINCH_THRESHOLD = 0.05;
@@ -119,6 +124,11 @@ export default function GestureOverlay() {
   const showCam = useStore((s) => s.handsShowCam);
   const setHandsShowCam = useStore((s) => s.setHandsShowCam);
   const setGestureStatus = useStore((s) => s.setGestureStatus);
+  const desktopControlEnabled = useStore((s) => s.desktopControlEnabled);
+  const desktopControlMode = useStore((s) => s.desktopControlMode);
+  const desktopOverlayEnabled = useStore((s) => s.desktopOverlayEnabled);
+  const desktopPaused = useStore((s) => s.desktopPaused);
+  const setDesktopGesture = useStore((s) => s.setDesktopGesture);
   const videoRef = useRef<HTMLVideoElement>(null);
   const cloudRef = useRef<HTMLCanvasElement>(null);
   const circleRefs = useRef<[HTMLDivElement | null, HTMLDivElement | null]>([null, null]);
@@ -133,11 +143,22 @@ export default function GestureOverlay() {
   const scaleIdRef = useRef<string | null>(null);
   const scaleBaseDistRef = useRef(0);
   const scaleBaseBoxRef = useRef<{ w: number; h: number } | null>(null);
+  /** When Precision/Spatial inject OS input, skip HUD DOM click/drag. */
+  const desktopInjectRef = useRef(false);
+  const desktopControlEnabledRef = useRef(desktopControlEnabled);
+  const desktopOverlayEnabledRef = useRef(desktopOverlayEnabled);
+  desktopControlEnabledRef.current = desktopControlEnabled;
+  desktopOverlayEnabledRef.current = desktopOverlayEnabled;
+  desktopInjectRef.current =
+    desktopControlEnabled &&
+    !desktopPaused &&
+    (desktopControlMode === "precision" || desktopControlMode === "spatial");
 
   useEffect(() => {
     if (!enabled) {
       stop();
       setGestureStatus("");
+      requestDesktopOverlay(false);
       try {
         delete document.body.dataset.jarvisHands;
       } catch { /* noop */ }
@@ -293,6 +314,21 @@ export default function GestureOverlay() {
           paintCircle(i, null, null);
         }
 
+        // Shared pipeline → desktop control + system-wide overlay (no 2nd camera).
+        if (desktopControlEnabledRef.current || desktopOverlayEnabledRef.current) {
+          publishHandsFrame(
+            {
+              t: now,
+              hands: packLandmarks(hands),
+              lost: hands.length === 0,
+              poses: primary.map((p) => p.mode),
+            },
+            { overlay: desktopOverlayEnabledRef.current },
+          );
+          if (primary[0]) setDesktopGesture(primary[0].mode);
+          else setDesktopGesture(hands.length ? "track" : "lost");
+        }
+
         // Broadcast index-finger cursor for Neural + any listeners (raw, no lag).
         if (primary[0]) {
           window.dispatchEvent(
@@ -320,8 +356,27 @@ export default function GestureOverlay() {
           );
         }
 
-        // —— One-hand cursor actions (hand 0) ——
-        if (primary[0]) {
+        // —— One-hand cursor actions (hand 0) —— HUD only when not injecting OS input
+        if (desktopInjectRef.current) {
+          lastPinchRef.current[0] = primary[0]?.mode === "pinch";
+          // Still release any in-progress HUD drag if we switched modes mid-grab.
+          if (dragIdRef.current) {
+            window.dispatchEvent(
+              new CustomEvent("jarvis:gesture-release", {
+                detail: { id: dragIdRef.current, x: -1, y: -1 },
+              }),
+            );
+            dragIdRef.current = null;
+          }
+          if (scaleIdRef.current) {
+            window.dispatchEvent(
+              new CustomEvent("jarvis:gesture-release", {
+                detail: { id: scaleIdRef.current },
+              }),
+            );
+            scaleIdRef.current = null;
+          }
+        } else if (primary[0]) {
           const { tip, mode } = primary[0];
           const pinchNow = mode === "pinch";
           // Index finger = cursor: pinch selects like a click (never while dragging a tile,
@@ -408,61 +463,63 @@ export default function GestureOverlay() {
           }
         }
 
-        // —— Two-hand scale ——
-        if (primary.length >= 2) {
-          if (dragIdRef.current) {
+        // —— Two-hand scale —— HUD tiles only (Spatial handles OS resize)
+        if (!desktopInjectRef.current) {
+          if (primary.length >= 2) {
+            if (dragIdRef.current) {
+              window.dispatchEvent(
+                new CustomEvent("jarvis:gesture-release", {
+                  detail: {
+                    id: dragIdRef.current,
+                    x: primary[0].tip.x,
+                    y: primary[0].tip.y,
+                  },
+                }),
+              );
+              dragIdRef.current = null;
+            }
+            const d = dist(primary[0].tip, primary[1].tip);
+            if (!scaleIdRef.current) {
+              const mid = {
+                x: (primary[0].tip.x + primary[1].tip.x) / 2,
+                y: (primary[0].tip.y + primary[1].tip.y) / 2,
+              };
+              const hit = document
+                .elementFromPoint(mid.x, mid.y)
+                ?.closest("[data-floating-id]") as HTMLElement | null;
+              const id = hit?.getAttribute("data-floating-id");
+              if (id && d > 40) {
+                scaleIdRef.current = id;
+                scaleBaseDistRef.current = d;
+                const rect = hit!.getBoundingClientRect();
+                scaleBaseBoxRef.current = { w: rect.width, h: rect.height };
+              }
+            } else if (scaleBaseDistRef.current > 1 && scaleBaseBoxRef.current) {
+              const factor = Math.max(
+                0.55,
+                Math.min(2.4, d / scaleBaseDistRef.current),
+              );
+              window.dispatchEvent(
+                new CustomEvent("jarvis:gesture-scale", {
+                  detail: {
+                    id: scaleIdRef.current,
+                    factor,
+                    baseW: scaleBaseBoxRef.current.w,
+                    baseH: scaleBaseBoxRef.current.h,
+                  },
+                }),
+              );
+            }
+          } else if (scaleIdRef.current) {
             window.dispatchEvent(
               new CustomEvent("jarvis:gesture-release", {
-                detail: {
-                  id: dragIdRef.current,
-                  x: primary[0].tip.x,
-                  y: primary[0].tip.y,
-                },
+                detail: { id: scaleIdRef.current },
               }),
             );
-            dragIdRef.current = null;
+            scaleIdRef.current = null;
+            scaleBaseDistRef.current = 0;
+            scaleBaseBoxRef.current = null;
           }
-          const d = dist(primary[0].tip, primary[1].tip);
-          if (!scaleIdRef.current) {
-            const mid = {
-              x: (primary[0].tip.x + primary[1].tip.x) / 2,
-              y: (primary[0].tip.y + primary[1].tip.y) / 2,
-            };
-            const hit = document
-              .elementFromPoint(mid.x, mid.y)
-              ?.closest("[data-floating-id]") as HTMLElement | null;
-            const id = hit?.getAttribute("data-floating-id");
-            if (id && d > 40) {
-              scaleIdRef.current = id;
-              scaleBaseDistRef.current = d;
-              const rect = hit!.getBoundingClientRect();
-              scaleBaseBoxRef.current = { w: rect.width, h: rect.height };
-            }
-          } else if (scaleBaseDistRef.current > 1 && scaleBaseBoxRef.current) {
-            const factor = Math.max(
-              0.55,
-              Math.min(2.4, d / scaleBaseDistRef.current),
-            );
-            window.dispatchEvent(
-              new CustomEvent("jarvis:gesture-scale", {
-                detail: {
-                  id: scaleIdRef.current,
-                  factor,
-                  baseW: scaleBaseBoxRef.current.w,
-                  baseH: scaleBaseBoxRef.current.h,
-                },
-              }),
-            );
-          }
-        } else if (scaleIdRef.current) {
-          window.dispatchEvent(
-            new CustomEvent("jarvis:gesture-release", {
-              detail: { id: scaleIdRef.current },
-            }),
-          );
-          scaleIdRef.current = null;
-          scaleBaseDistRef.current = 0;
-          scaleBaseBoxRef.current = null;
         }
 
         if (now - lastStatusRef.current > STATUS_MS) {
@@ -485,6 +542,15 @@ export default function GestureOverlay() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabled]);
 
+  // Overlay lifecycle — never reopen the webcam.
+  useEffect(() => {
+    if (enabled && desktopControlEnabled && desktopOverlayEnabled) {
+      requestDesktopOverlay(true);
+    } else {
+      requestDesktopOverlay(false);
+    }
+  }, [enabled, desktopControlEnabled, desktopOverlayEnabled]);
+
   function stop() {
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
     rafRef.current = 0;
@@ -499,6 +565,7 @@ export default function GestureOverlay() {
     dragIdRef.current = null;
     scaleIdRef.current = null;
     smoothRef.current = [null, null];
+    requestDesktopOverlay(false);
     try {
       delete document.body.dataset.jarvisHands;
     } catch { /* noop */ }

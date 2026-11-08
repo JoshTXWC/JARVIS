@@ -13,6 +13,10 @@ const ALLOWED_OUT = new Set([
   "jarvis:show",
   "jarvis:hide",
   "jarvis:toggle-visibility",
+  "jarvis:hands-overlay-frame",
+  "jarvis:desktop-overlay-open",
+  "jarvis:desktop-overlay-close",
+  "jarvis:desktop-overlay-meta",
 ]);
 
 contextBridge.exposeInMainWorld("jarvis", {
@@ -23,7 +27,12 @@ contextBridge.exposeInMainWorld("jarvis", {
   },
   // Main → renderer subscription.
   on: (channel, cb) => {
-    const valid = new Set(["jarvis:visibility-changed", "jarvis:trigger-wake"]);
+    const valid = new Set([
+      "jarvis:visibility-changed",
+      "jarvis:trigger-wake",
+      "jarvis:desktop-overlay-action",
+      "jarvis:desktop-emergency-stop",
+    ]);
     if (!valid.has(channel)) return () => {};
     const wrapped = (_evt, ...args) => cb(...args);
     ipcRenderer.on(channel, wrapped);

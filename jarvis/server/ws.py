@@ -44,10 +44,24 @@ HELP_TEXT = (
 
 
 async def websocket_endpoint(ws: WebSocket) -> None:
-    # Guard accept — if the browser dropped before the handshake finished,
-    # `accept()` raises immediately. Without this guard the receive loop
-    # below would crash with "WebSocket is not connected. Need to call
-    # accept first." (see the ws_error trace from 2026-05-26 16:56:57).
+    from ..core.session_auth import get_session_auth, origin_allowed, trusted_origins
+
+    # Origin validation — mitigate localhost Cross-Site WebSocket Hijacking.
+    origin = ws.headers.get("origin")
+    if not origin_allowed(origin, trusted_origins()):
+        log.warning("ws rejected origin=%s", origin)
+        await ws.close(code=1008)
+        return
+
+    auth = get_session_auth()
+    session_q = ws.query_params.get("session") or ws.headers.get("x-jarvis-session")
+    if not auth.check(session_q):
+        # Allow accept then require an auth frame within the first message, OR deny.
+        # Prefer deny-at-handshake when token missing to reduce attack surface.
+        log.warning("ws rejected: missing/invalid session")
+        await ws.close(code=1008)
+        return
+
     try:
         await ws.accept()
     except Exception as e:  # noqa: BLE001
@@ -58,21 +72,24 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     memory = state.memory
     agents = state.agents
     cfg = state.cfg
+    # Bind session to this connection for approval grants.
+    session_id = session_q or "ws"
+    try:
+        orchestrator._session_id = session_id  # noqa: SLF001
+    except Exception:
+        pass
 
-    # Pending confirmation futures keyed by short id.
-    pending: dict[str, asyncio.Future] = {}
-    # The single in-flight brain task (None if idle).
+    # Pending confirmations: id -> (future, grant_token, tool, args)
+    pending: dict[str, dict[str, Any]] = {}
     brain_task: asyncio.Task | None = None
-    # Lock so two `chat` messages can't race the task swap.
     swap_lock = asyncio.Lock()
-    send_lock = asyncio.Lock()  # uvicorn complains if two coros write concurrently
+    send_lock = asyncio.Lock()
 
     async def safe_send(msg: dict) -> None:
         async with send_lock:
             try:
                 await ws.send_json(msg)
             except Exception:  # noqa: BLE001
-                # connection dying — swallow; outer loop will tear down.
                 pass
 
     await safe_send({
@@ -82,18 +99,20 @@ async def websocket_endpoint(ws: WebSocket) -> None:
 
     async def cancel_running(reason: str = "superseded") -> None:
         nonlocal brain_task
-        # Resolve any dangling confirmations as deny so the brain stops awaiting.
-        for fut in list(pending.values()):
-            if not fut.done():
+        for entry in list(pending.values()):
+            fut = entry.get("fut")
+            if fut and not fut.done():
                 fut.set_result(False)
         pending.clear()
+        try:
+            orchestrator.permissions.revoke_all_grants()
+        except Exception:
+            pass
         if brain_task and not brain_task.done():
             brain_task.cancel()
             try:
                 await brain_task
             except (asyncio.CancelledError, Exception):
-                # Cancelled is expected; other exceptions logged but never
-                # re-raised — we are tearing down by design.
                 pass
             await safe_send({"type": "info", "text": f"task cancelled ({reason})"})
         brain_task = None
@@ -138,9 +157,87 @@ async def websocket_endpoint(ws: WebSocket) -> None:
 
             elif mtype == "confirm":
                 rid = msg.get("id")
-                fut = pending.pop(rid, None)
-                if fut and not fut.done():
-                    fut.set_result(bool(msg.get("approved")))
+                entry = pending.pop(rid, None)
+                if entry:
+                    fut = entry.get("fut")
+                    approved = bool(msg.get("approved"))
+                    token = msg.get("token") or ""
+                    # Must present the grant token issued with the request.
+                    if approved:
+                        if token != entry.get("token"):
+                            approved = False
+                            log.warning("confirm rejected: grant token mismatch for %s", rid)
+                    if fut and not fut.done():
+                        fut.set_result(approved)
+
+            elif mtype == "kill_switch":
+                n = 0
+                try:
+                    n = orchestrator.permissions.revoke_all_grants()
+                except Exception:
+                    pass
+                try:
+                    from ..integrations.desktop_control import get_desktop_control
+                    dc = getattr(state, "desktop_control", None) or get_desktop_control(
+                        cfg.abs_path("data")
+                    )
+                    state.desktop_control = dc
+                    dc.emergency_stop()
+                except Exception:
+                    pass
+                await cancel_running("kill switch")
+                await safe_send({
+                    "type": "info",
+                    "text": f"emergency stop — revoked {n} grants, cancelled running task",
+                })
+
+            elif mtype == "hands_frame":
+                # High-rate landmark stream from the shared MediaPipe pipeline.
+                try:
+                    from ..integrations.desktop_control import get_desktop_control
+                    dc = getattr(state, "desktop_control", None) or get_desktop_control(
+                        cfg.abs_path("data")
+                    )
+                    state.desktop_control = dc
+                    result = await asyncio.to_thread(dc.ingest_frame, msg)
+                    # Throttle ACKs — only reply on meaningful gesture / action.
+                    st = (result or {}).get("status") or {}
+                    if (result or {}).get("jarvis_action") or st.get("gesture") not in {
+                        None, "none", "drag_move",
+                    }:
+                        await safe_send({
+                            "type": "desktop_control_status",
+                            **(result or {}),
+                        })
+                except Exception as e:  # noqa: BLE001
+                    log.debug("hands_frame failed: %s", e)
+
+            elif mtype == "desktop_control":
+                try:
+                    from ..integrations.desktop_control import get_desktop_control
+                    dc = getattr(state, "desktop_control", None) or get_desktop_control(
+                        cfg.abs_path("data")
+                    )
+                    state.desktop_control = dc
+                    action = (msg.get("action") or "").strip().lower()
+                    if action == "enable":
+                        out = dc.set_enabled(bool(msg.get("enabled")))
+                    elif action == "mode":
+                        out = dc.set_mode(str(msg.get("mode") or "hud"))
+                    elif action == "pause":
+                        out = dc.set_paused(bool(msg.get("paused")))
+                    elif action == "emergency_stop":
+                        out = dc.emergency_stop()
+                    elif action == "settings":
+                        out = dc.update_settings(msg.get("patch") or {})
+                    elif action == "status":
+                        out = dc.status()
+                    else:
+                        await safe_send({"type": "error", "text": f"unknown desktop_control action: {action}"})
+                        continue
+                    await safe_send({"type": "desktop_control_status", **out})
+                except Exception as e:  # noqa: BLE001
+                    await safe_send({"type": "error", "text": f"desktop_control: {e}"})
 
             elif mtype == "agent":
                 name = msg.get("name", "")
@@ -152,7 +249,44 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                     await safe_send({"type": "error", "text": f"no such agent: {name}"})
 
             elif mtype == "cancel":
+                try:
+                    orchestrator.tasks.request_cancel()
+                except Exception:
+                    pass
                 await cancel_running("user request")
+
+            elif mtype == "pause":
+                ok = False
+                try:
+                    ok = orchestrator.tasks.request_pause()
+                except Exception:
+                    pass
+                await safe_send({
+                    "type": "task_status",
+                    "ok": ok,
+                    **orchestrator.tasks.status(),
+                })
+                if ok:
+                    await safe_send({"type": "info", "text": "task paused at next tool boundary"})
+
+            elif mtype == "resume":
+                ok = False
+                try:
+                    ok = orchestrator.tasks.request_resume()
+                except Exception:
+                    pass
+                await safe_send({
+                    "type": "task_status",
+                    **orchestrator.tasks.status(),
+                })
+                if ok:
+                    await safe_send({"type": "info", "text": "task resumed"})
+
+            elif mtype == "task_status":
+                await safe_send({
+                    "type": "task_status",
+                    **orchestrator.tasks.status(),
+                })
 
             elif mtype == "command":
                 line = (msg.get("command") or "").strip()
@@ -347,18 +481,24 @@ async def _emit_event(send, ev: Event, pending: dict[str, asyncio.Future]) -> No
         await send({"type": "task_end", "text": ev.text, "ok": bool(ev.payload.get("ok", True))})
     elif ev.kind is EventKind.CONFIRMATION:
         if ev.confirm_req and ev.confirm_future:
-            rid = uuid.uuid4().hex[:8]
-            pending[rid] = ev.confirm_future
+            from ..core.secrets import redact_args, redact_text
+            rid = uuid.uuid4().hex[:12]
+            grant_token = ev.confirm_req.reason  # orchestrator stores grant.token here
+            pending[rid] = {
+                "fut": ev.confirm_future,
+                "token": grant_token,
+                "tool": ev.confirm_req.tool,
+            }
             await send({
                 "type": "confirm_request",
                 "id": rid,
+                "token": grant_token,
                 "tool": ev.confirm_req.tool,
                 "permission": ev.confirm_req.permission.value,
-                "preview": ev.confirm_req.preview,
-                "args": ev.confirm_req.args,
+                "preview": redact_text(ev.confirm_req.preview),
+                "args": redact_args(ev.confirm_req.args),
             })
-            # Belt-and-braces timeout so a forgotten dialog never hangs the
-            # orchestrator forever. Auto-deny after CONFIRM_TIMEOUT_S.
+
             async def _timeout(fut: asyncio.Future, rid: str) -> None:
                 try:
                     await asyncio.sleep(CONFIRM_TIMEOUT_S)

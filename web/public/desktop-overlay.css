@@ -1,0 +1,46 @@
+html, body {
+  margin: 0; width: 100%; height: 100%; overflow: hidden;
+  background: transparent; user-select: none;
+  font-family: "Segoe UI", "JetBrains Mono", ui-monospace, monospace;
+}
+canvas { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+#chip {
+  position: fixed; top: 18px; right: 18px; z-index: 2;
+  min-width: 168px; padding: 10px 12px;
+  border-radius: 12px;
+  background: linear-gradient(160deg, rgba(8,16,28,0.78), rgba(4,10,20,0.62));
+  box-shadow: inset 0 0 0 1px rgba(125,211,252,0.28), 0 10px 40px rgba(0,0,0,0.35);
+  backdrop-filter: blur(14px);
+  color: rgba(224,242,254,0.92);
+  pointer-events: auto;
+  -webkit-app-region: no-drag;
+}
+#chip.hidden { display: none; }
+.row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.label { font-size: 9px; letter-spacing: 0.22em; text-transform: uppercase; color: rgba(125,211,252,0.55); }
+.value { font-size: 11px; letter-spacing: 0.08em; color: rgba(224,242,254,0.95); }
+.cam {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: rgba(52,211,153,0.95);
+  box-shadow: 0 0 10px rgba(52,211,153,0.7);
+}
+.cam.off { background: rgba(251,113,133,0.9); box-shadow: none; }
+.btns { display: flex; gap: 6px; margin-top: 8px; }
+button {
+  flex: 1; border: 0; border-radius: 8px; cursor: pointer;
+  padding: 6px 8px; font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase;
+  color: rgba(224,242,254,0.9);
+  background: rgba(125,211,252,0.12);
+  box-shadow: inset 0 0 0 1px rgba(125,211,252,0.25);
+}
+button:hover { background: rgba(125,211,252,0.22); }
+#collapsed {
+  position: fixed; top: 18px; right: 18px; z-index: 2;
+  width: 36px; height: 36px; border-radius: 10px;
+  display: none; place-items: center;
+  background: rgba(8,16,28,0.75);
+  box-shadow: inset 0 0 0 1px rgba(125,211,252,0.3);
+  color: #7dd3fc; font-size: 14px; cursor: pointer;
+  pointer-events: auto;
+}
+#collapsed.show { display: grid; }

@@ -25,6 +25,146 @@ from pydantic import BaseModel
 router = APIRouter()
 _stt_log = logging.getLogger("jarvis.stt")
 
+# Paths that do not require a session token (loopback bootstrap + health).
+_PUBLIC_API_SUFFIXES = {
+    "/health",
+    "/session/bootstrap",
+}
+
+
+def _client_is_loopback(request: Request) -> bool:
+    host = (request.client.host if request.client else "") or ""
+    return host in {"127.0.0.1", "::1", "localhost"}
+
+
+def _extract_session(request: Request) -> str | None:
+    return (
+        request.headers.get("x-jarvis-session")
+        or request.query_params.get("session")
+        or None
+    )
+
+
+async def require_session(request: Request) -> None:
+    """FastAPI dependency — privileged API routes."""
+    from ..core.session_auth import get_session_auth
+    path = request.url.path
+    if any(path.endswith(s) for s in _PUBLIC_API_SUFFIXES):
+        return
+    auth = get_session_auth()
+    if auth.check(_extract_session(request)):
+        return
+    from fastapi import HTTPException
+    raise HTTPException(status_code=401, detail="session required")
+
+
+@router.get("/session/bootstrap")
+async def session_bootstrap(request: Request):
+    """Mint/return desktop session for Electron or local UI. Loopback only."""
+    from ..core.session_auth import get_session_auth
+    if not _client_is_loopback(request):
+        return JSONResponse({"ok": False, "error": "loopback only"}, status_code=403)
+    auth = get_session_auth()
+    return auth.mint_bootstrap_payload()
+
+
+@router.get("/security/status")
+async def security_status(request: Request):
+    await require_session(request)
+    orch = request.app.state.orchestrator
+    auth = request.app.state.session_auth
+    tools = []
+    try:
+        for t in request.app.state.registry.list_tools():
+            tools.append({
+                "name": t.name if hasattr(t, "name") else t.get("name"),
+                "permission": (
+                    t.permission.value if hasattr(t, "permission")
+                    else t.get("permission")
+                ),
+            })
+    except Exception:
+        tools = []
+    privileged = [t for t in tools if (t.get("permission") or "") in {"caution", "dangerous"}]
+    return {
+        "mode": orch.permissions.mode,
+        "auth_required": not auth.disabled,
+        "session_ok": auth.check(_extract_session(request)),
+        "pending_grants": orch.permissions.pending_grants(),
+        "recent_events": orch.permissions.recent_events(40),
+        "privileged_tools": privileged,
+        "tool_count": len(tools),
+    }
+
+
+class _ModeBody(BaseModel):
+    mode: str
+
+
+@router.post("/security/mode")
+async def security_set_mode(body: _ModeBody, request: Request):
+    await require_session(request)
+    orch = request.app.state.orchestrator
+    try:
+        orch.permissions.set_mode(body.mode)
+    except ValueError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+    return {"ok": True, "mode": orch.permissions.mode}
+
+
+@router.post("/security/kill")
+async def security_kill(request: Request):
+    """Emergency stop: revoke grants. Running WS tasks cancelled by client kill_switch."""
+    await require_session(request)
+    orch = request.app.state.orchestrator
+    n = orch.permissions.revoke_all_grants()
+    return {"ok": True, "revoked": n}
+
+
+@router.get("/tasks/status")
+async def tasks_status(request: Request):
+    await require_session(request)
+    return request.app.state.orchestrator.tasks.status()
+
+
+@router.post("/tasks/pause")
+async def tasks_pause(request: Request):
+    await require_session(request)
+    ok = request.app.state.orchestrator.tasks.request_pause()
+    return {"ok": ok, **request.app.state.orchestrator.tasks.status()}
+
+
+@router.post("/tasks/resume")
+async def tasks_resume(request: Request):
+    await require_session(request)
+    ok = request.app.state.orchestrator.tasks.request_resume()
+    return {"ok": ok, **request.app.state.orchestrator.tasks.status()}
+
+
+@router.post("/workspace/project")
+async def workspace_set_project(request: Request):
+    """Associate a project directory for scoped reads (must stay under allowlist roots)."""
+    await require_session(request)
+    body = await request.json()
+    path = (body or {}).get("path") or ""
+    from ..core.path_guard import PathDenied, assert_readable
+    from ..config import PROJECT_ROOT
+    try:
+        # Validate exists and is a directory under readable roots; do not ingest secrets.
+        p = assert_readable(path, PROJECT_ROOT, allow_home=True)
+        if not p.is_dir():
+            return JSONResponse({"ok": False, "error": "not a directory"}, status_code=400)
+        request.app.state.workspace_project = str(p)
+        return {"ok": True, "path": str(p)}
+    except PathDenied as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=403)
+
+
+@router.get("/workspace/project")
+async def workspace_get_project(request: Request):
+    await require_session(request)
+    return {"path": getattr(request.app.state, "workspace_project", None)}
+
 # ── VRAM manager integration ────────────────────────────────────────────────
 from ..core.vram_manager import (
     GPUResource,
@@ -478,6 +618,121 @@ async def barehands_close_endpoint(request: Request):
         return {"ok": True, **bh.status()}
     except Exception as e:  # noqa: BLE001
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
+# ── Barehands 2.0 desktop control (loopback + session only) ───────────────
+
+def _desktop_control(request: Request):
+    from ..integrations.desktop_control import get_desktop_control
+    svc = getattr(request.app.state, "desktop_control", None)
+    if svc is None:
+        data = request.app.state.cfg.abs_path("data")
+        svc = get_desktop_control(data)
+        request.app.state.desktop_control = svc
+    return svc
+
+
+async def _require_desktop_control(request: Request):
+    """Session + loopback — never expose OS input injection off-machine."""
+    await require_session(request)
+    if not _client_is_loopback(request):
+        return JSONResponse(
+            {"ok": False, "error": "desktop control is loopback-only"},
+            status_code=403,
+        )
+    return None
+
+
+@router.get("/desktop-control/status")
+async def desktop_control_status(request: Request):
+    denied = await _require_desktop_control(request)
+    if denied is not None:
+        return denied
+    return _desktop_control(request).status()
+
+
+class DesktopControlSettingsBody(BaseModel):
+    patch: dict = {}
+
+
+@router.post("/desktop-control/settings")
+async def desktop_control_settings(request: Request, body: DesktopControlSettingsBody):
+    denied = await _require_desktop_control(request)
+    if denied is not None:
+        return denied
+    try:
+        return _desktop_control(request).update_settings(body.patch or {})
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
+
+class DesktopControlModeBody(BaseModel):
+    mode: str
+
+
+@router.post("/desktop-control/mode")
+async def desktop_control_mode(request: Request, body: DesktopControlModeBody):
+    denied = await _require_desktop_control(request)
+    if denied is not None:
+        return denied
+    try:
+        return _desktop_control(request).set_mode(body.mode)
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
+
+class DesktopControlEnableBody(BaseModel):
+    enabled: bool
+
+
+@router.post("/desktop-control/enable")
+async def desktop_control_enable(request: Request, body: DesktopControlEnableBody):
+    denied = await _require_desktop_control(request)
+    if denied is not None:
+        return denied
+    return _desktop_control(request).set_enabled(bool(body.enabled))
+
+
+class DesktopControlPauseBody(BaseModel):
+    paused: bool
+
+
+@router.post("/desktop-control/pause")
+async def desktop_control_pause(request: Request, body: DesktopControlPauseBody):
+    denied = await _require_desktop_control(request)
+    if denied is not None:
+        return denied
+    return _desktop_control(request).set_paused(bool(body.paused))
+
+
+@router.post("/desktop-control/emergency-stop")
+async def desktop_control_emergency_stop(request: Request):
+    denied = await _require_desktop_control(request)
+    if denied is not None:
+        return denied
+    return _desktop_control(request).emergency_stop()
+
+
+@router.post("/desktop-control/frame")
+async def desktop_control_frame(request: Request):
+    """Low-frequency fallback; prefer WS `hands_frame` for cursor streaming."""
+    denied = await _require_desktop_control(request)
+    if denied is not None:
+        return denied
+    try:
+        payload = await request.json()
+    except Exception:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": "invalid json"}, status_code=400)
+    return _desktop_control(request).ingest_frame(payload if isinstance(payload, dict) else {})
+
+
+@router.get("/desktop-control/actions")
+async def desktop_control_actions(request: Request):
+    denied = await _require_desktop_control(request)
+    if denied is not None:
+        return denied
+    from ..integrations.desktop_control.actions import describe_actions
+    return {"ok": True, "actions": describe_actions()}
 
 
 @router.get("/image-models")

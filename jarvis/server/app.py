@@ -122,13 +122,16 @@ def create_app(
             pass
         await orchestrator.brain.aclose()
 
+    from ..core.session_auth import get_session_auth, trusted_origins
+
     app = FastAPI(title="JARVIS", version="0.2.0", lifespan=lifespan)
+    _origins = trusted_origins()
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=False,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_origins=_origins,
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        allow_headers=["*", "X-Jarvis-Session", "Content-Type", "Authorization"],
     )
 
     # Stash services on app.state so routes/ws can read them
@@ -137,6 +140,20 @@ def create_app(
     app.state.registry = registry
     app.state.memory = memory
     app.state.agents = agents
+    app.state.session_auth = get_session_auth()
+
+    @app.middleware("http")
+    async def session_guard(request, call_next):
+        path = request.url.path
+        if path.startswith("/api/") and not (
+            path.endswith("/health")
+            or path.endswith("/session/bootstrap")
+        ):
+            from ..core.session_auth import get_session_auth
+            token = request.headers.get("x-jarvis-session") or request.query_params.get("session")
+            if not get_session_auth().check(token):
+                return JSONResponse({"error": "session required"}, status_code=401)
+        return await call_next(request)
 
     app.include_router(routes.router, prefix="/api")
     app.add_api_websocket_route("/ws", ws.websocket_endpoint)
@@ -161,6 +178,10 @@ def create_app(
             target = web_dist / full_path
             if target.is_file():
                 return FileResponse(target)
+            # Dev/fallback: serve files from web/public (desktop-overlay.html, models).
+            public = cfg.project_root / "web" / "public" / full_path
+            if public.is_file():
+                return FileResponse(public)
             return FileResponse(index) if index.exists() else JSONResponse({"error": "not found"}, status_code=404)
     else:
         @app.get("/")

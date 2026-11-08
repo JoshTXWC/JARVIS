@@ -26,9 +26,11 @@ const FULL_W = 1600;
 const FULL_H = 1000;
 
 let mainWindow = null;
+let overlayWindow = null;
 let backend = null;
 let tray = null;
 let isQuiting = false;
+let overlayWanted = false;
 
 // ── backend lifecycle ─────────────────────────────────────────────────────
 
@@ -171,23 +173,38 @@ function installPermissionHandlers() {
     "clipboard-sanitized-write",
     "notifications",
   ]);
-  const isLocal = (urlStr) => {
+  /** Only the app backend origin — not arbitrary localhost / file / data. */
+  const isAppOrigin = (urlStr) => {
     if (!urlStr) return false;
-    return (
-      urlStr.startsWith(BACKEND_URL) ||
-      urlStr.startsWith("http://127.0.0.1:") ||
-      urlStr.startsWith("http://localhost:") ||
-      urlStr.startsWith("file://") ||
-      urlStr.startsWith("data:")
-    );
+    return urlStr.startsWith(BACKEND_URL) || urlStr === `${BACKEND_URL}/`;
   };
   session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
     const url = webContents?.getURL?.() || "";
-    callback(isLocal(url) && ALLOWED.has(permission));
+    callback(isAppOrigin(url) && ALLOWED.has(permission));
   });
   session.defaultSession.setPermissionCheckHandler((webContents, permission, requestingOrigin) => {
     const url = webContents?.getURL?.() || requestingOrigin || "";
-    return isLocal(url) && ALLOWED.has(permission);
+    return isAppOrigin(url) && ALLOWED.has(permission);
+  });
+
+  // CSP for the loaded app page (loopback backend serves the HUD).
+  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    const headers = { ...details.responseHeaders };
+    const csp = [
+      "default-src 'self'",
+      "script-src 'self'",
+      "style-src 'self' 'unsafe-inline'",
+      "img-src 'self' data: blob: https:",
+      "media-src 'self' blob: mediastream:",
+      "font-src 'self' data:",
+      `connect-src 'self' ws://127.0.0.1:${BACKEND_PORT} ws://localhost:${BACKEND_PORT} http://127.0.0.1:${BACKEND_PORT} http://localhost:${BACKEND_PORT}`,
+      "worker-src 'self' blob:",
+      "frame-ancestors 'none'",
+      "object-src 'none'",
+      "base-uri 'self'",
+    ].join("; ");
+    headers["Content-Security-Policy"] = [csp];
+    callback({ responseHeaders: headers });
   });
 }
 
@@ -273,11 +290,18 @@ function createWindow() {
   });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:\/\//i.test(url)) {
+    // External https only via OS browser; never navigate the app shell away.
+    if (/^https:\/\//i.test(url)) {
       shell.openExternal(url);
-      return { action: "deny" };
     }
-    return { action: "allow" };
+    return { action: "deny" };
+  });
+
+  mainWindow.webContents.on("will-navigate", (e, url) => {
+    if (!url.startsWith(BACKEND_URL)) {
+      e.preventDefault();
+      if (/^https:\/\//i.test(url)) shell.openExternal(url);
+    }
   });
 
   // Close → hide to tray. Quit only via tray menu / isQuiting flag.
@@ -330,6 +354,76 @@ async function loadApp() {
 
 // ── IPC ───────────────────────────────────────────────────────────────────
 
+function virtualDisplayBounds() {
+  const displays = screen.getAllDisplays();
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const d of displays) {
+    const b = d.bounds;
+    minX = Math.min(minX, b.x);
+    minY = Math.min(minY, b.y);
+    maxX = Math.max(maxX, b.x + b.width);
+    maxY = Math.max(maxY, b.y + b.height);
+  }
+  if (!Number.isFinite(minX)) {
+    const p = screen.getPrimaryDisplay().bounds;
+    return { x: p.x, y: p.y, width: p.width, height: p.height };
+  }
+  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+}
+
+function createOverlayWindow() {
+  if (overlayWindow && !overlayWindow.isDestroyed()) return overlayWindow;
+  const bounds = virtualDisplayBounds();
+  overlayWindow = new BrowserWindow({
+    ...bounds,
+    frame: false,
+    transparent: true,
+    backgroundColor: "#00000000",
+    resizable: false,
+    movable: false,
+    maximizable: false,
+    minimizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    focusable: false,
+    hasShadow: false,
+    show: false,
+    alwaysOnTop: true,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      preload: path.join(__dirname, "overlay-preload.cjs"),
+    },
+  });
+  // Click-through everywhere except CSS pointer-events:auto regions (control chip).
+  overlayWindow.setIgnoreMouseEvents(true, { forward: true });
+  try {
+    overlayWindow.setAlwaysOnTop(true, "screen-saver");
+  } catch {
+    overlayWindow.setAlwaysOnTop(true);
+  }
+  overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  overlayWindow.loadURL(`${BACKEND_URL}/desktop-overlay.html`);
+  overlayWindow.on("closed", () => { overlayWindow = null; });
+  return overlayWindow;
+}
+
+function openDesktopOverlay() {
+  overlayWanted = true;
+  const win = createOverlayWindow();
+  if (!win.isVisible()) win.showInactive();
+  // Re-fit if display layout changed.
+  try { win.setBounds(virtualDisplayBounds()); } catch { /* noop */ }
+}
+
+function closeDesktopOverlay() {
+  overlayWanted = false;
+  if (overlayWindow && !overlayWindow.isDestroyed()) {
+    overlayWindow.hide();
+  }
+}
+
 function installIpc() {
   ipcMain.on("jarvis:wake", () => {
     // Renderer detected the wake word — bring the HUD forward.
@@ -338,6 +432,26 @@ function installIpc() {
   ipcMain.on("jarvis:show", () => showWindow());
   ipcMain.on("jarvis:hide", () => hideWindow());
   ipcMain.on("jarvis:toggle-visibility", () => toggleVisibility());
+
+  ipcMain.on("jarvis:desktop-overlay-open", () => openDesktopOverlay());
+  ipcMain.on("jarvis:desktop-overlay-close", () => closeDesktopOverlay());
+  ipcMain.on("jarvis:hands-overlay-frame", (_e, frame) => {
+    if (!overlayWanted) return;
+    if (overlayWindow && !overlayWindow.isDestroyed()) {
+      overlayWindow.webContents.send("jarvis:overlay-frame", frame);
+    }
+  });
+  ipcMain.on("jarvis:desktop-overlay-meta", (_e, meta) => {
+    if (overlayWindow && !overlayWindow.isDestroyed()) {
+      overlayWindow.webContents.send("jarvis:overlay-meta", meta);
+    }
+  });
+  ipcMain.on("jarvis:overlay-action", (_e, payload) => {
+    // Forward overlay chip actions to the main HUD renderer.
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("jarvis:desktop-overlay-action", payload);
+    }
+  });
 }
 
 // ── global shortcuts ─────────────────────────────────────────────────────
@@ -346,6 +460,38 @@ function installShortcuts() {
   const accel = "CommandOrControl+Shift+Space";
   const ok = globalShortcut.register(accel, toggleVisibility);
   if (!ok) console.warn("[electron] failed to register", accel);
+
+  // Barehands 2.0 emergency stop — always available while Electron is running.
+  const stopAccel = "CommandOrControl+Shift+Alt+Escape";
+  if (!globalShortcut.register(stopAccel, () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("jarvis:desktop-emergency-stop");
+    }
+  })) {
+    console.warn("[electron] failed to register", stopAccel);
+  }
+
+  const pauseAccel = "CommandOrControl+Shift+Alt+P";
+  if (!globalShortcut.register(pauseAccel, () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("jarvis:desktop-overlay-action", {
+        action: "toggle-pause",
+      });
+    }
+  })) {
+    console.warn("[electron] failed to register", pauseAccel);
+  }
+
+  const modeAccel = "CommandOrControl+Shift+Alt+M";
+  if (!globalShortcut.register(modeAccel, () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("jarvis:desktop-overlay-action", {
+        action: "cycle-mode",
+      });
+    }
+  })) {
+    console.warn("[electron] failed to register", modeAccel);
+  }
 }
 
 // ── lifecycle ─────────────────────────────────────────────────────────────
@@ -356,7 +502,7 @@ if (!singleInstance) {
 } else {
   app.on("second-instance", () => showWindow());
 
-  app.whenReady().then(() => {
+    app.whenReady().then(() => {
     Menu.setApplicationMenu(null);
     installPermissionHandlers();
     installIpc();
@@ -365,6 +511,15 @@ if (!singleInstance) {
     createTray();
     installShortcuts();
     loadApp();
+
+    const refitOverlay = () => {
+      if (overlayWanted && overlayWindow && !overlayWindow.isDestroyed()) {
+        try { overlayWindow.setBounds(virtualDisplayBounds()); } catch { /* noop */ }
+      }
+    };
+    screen.on("display-added", refitOverlay);
+    screen.on("display-removed", refitOverlay);
+    screen.on("display-metrics-changed", refitOverlay);
 
     app.on("activate", () => {
       if (BrowserWindow.getAllWindows().length === 0) {
@@ -389,6 +544,11 @@ app.on("will-quit", () => {
 app.on("before-quit", () => {
   isQuiting = true;
   persistCurrentBounds();
+  closeDesktopOverlay();
+  if (overlayWindow && !overlayWindow.isDestroyed()) {
+    try { overlayWindow.destroy(); } catch { /* ignore */ }
+    overlayWindow = null;
+  }
   if (backend) {
     try { backend.kill(); } catch { /* ignore */ }
     backend = null;

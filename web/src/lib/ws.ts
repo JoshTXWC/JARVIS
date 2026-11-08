@@ -1,4 +1,5 @@
 import { nextId, useStore } from "./store";
+import { ensureSession, wsUrlWithSession } from "./session";
 import { speak } from "./voice";
 
 type WSMessage = Record<string, any>;
@@ -18,8 +19,15 @@ class JarvisWS {
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
       return;
     }
+    void (async () => {
+      await ensureSession();
+      this._open(wsUrlWithSession(this.url));
+    })();
+  }
+
+  private _open(url: string) {
     try {
-      this.ws = new WebSocket(this.url);
+      this.ws = new WebSocket(url);
     } catch (e) {
       console.error("ws connect failed", e);
       this.scheduleReconnect();
@@ -332,12 +340,29 @@ class JarvisWS {
           permission: m.permission,
           preview: m.preview,
           args: m.args || {},
+          token: m.token,
         });
         break;
       case "done":
         if (useStore.getState().orbState === "thinking") useStore.getState().setOrb("idle");
         st.completePlan();
         break;
+      case "desktop_control_status": {
+        if (typeof m.enabled === "boolean") st.setDesktopControlEnabled(m.enabled);
+        if (m.mode === "hud" || m.mode === "precision" || m.mode === "spatial") {
+          st.setDesktopControlMode(m.mode);
+        }
+        if (typeof m.paused === "boolean") st.setDesktopPaused(m.paused);
+        const gesture = m.status?.gesture || m.gesture;
+        if (gesture) st.setDesktopGesture(String(gesture));
+        const action = m.jarvis_action || m.status?.jarvis_action;
+        if (action) {
+          window.dispatchEvent(
+            new CustomEvent("jarvis:desktop-action", { detail: { action } }),
+          );
+        }
+        break;
+      }
     }
     for (const fn of this.listeners) fn(m);
   }
@@ -353,14 +378,26 @@ class JarvisWS {
   command(cmd: string) {
     this.send({ type: "command", command: cmd });
   }
-  confirm(id: string, approved: boolean) {
-    this.send({ type: "confirm", id, approved });
+  confirm(id: string, approved: boolean, token?: string) {
+    this.send({ type: "confirm", id, approved, token });
   }
   agent(name: string) {
     this.send({ type: "agent", name });
   }
   cancel() {
     this.send({ type: "cancel" });
+  }
+  killSwitch() {
+    this.send({ type: "kill_switch" });
+  }
+  pause() {
+    this.send({ type: "pause" });
+  }
+  resume() {
+    this.send({ type: "resume" });
+  }
+  taskStatus() {
+    this.send({ type: "task_status" });
   }
 }
 
