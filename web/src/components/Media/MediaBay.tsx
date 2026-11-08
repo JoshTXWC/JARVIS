@@ -128,7 +128,7 @@ export default function MediaBay() {
               <IconBtn onClick={() => setCollapsed((c) => !c)} title={collapsed ? "Expand" : "Collapse"}>
                 {collapsed ? "▾" : "▴"}
               </IconBtn>
-              <IconBtn onClick={() => useStore.getState().clearMedia()} title="Clear bay" danger>×</IconBtn>
+              <IconBtn onClick={() => useStore.getState().clearMedia()} title="Clear bay" danger>CLR</IconBtn>
             </div>
           </div>
         </div>
@@ -308,7 +308,7 @@ function Card({
             {card.pinned ? "★" : "☆"}
           </IconBtn>
           {!large && <IconBtn onClick={onMaximize} title="Maximise">⛶</IconBtn>}
-          <IconBtn onClick={onClose} title="Dismiss" danger>×</IconBtn>
+          <IconBtn onClick={onClose} title="Dismiss" danger>CLR</IconBtn>
         </div>
       </div>
 

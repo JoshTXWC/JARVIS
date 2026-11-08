@@ -76,14 +76,24 @@ export default function ChatPanel() {
 }
 
 function Header() {
+  const health = useStore((s) => s.health);
+  const model = health?.model?.model;
   return (
     <div className="relative flex items-center justify-between px-4 py-2.5 shrink-0">
-      <div className="flex items-center gap-2.5">
-        <div className="w-1.5 h-1.5 bg-jarvis-aqua rounded-full animate-pulse_glow" />
+      <div className="flex items-center gap-2.5 min-w-0">
+        <div className="w-1.5 h-1.5 bg-jarvis-aqua rounded-full animate-pulse_glow shrink-0" />
         <span className="text-display text-[11px] tracking-[0.35em] text-shimmer">DIALOGUE</span>
-        <span className="text-mono text-[9px] text-jarvis-cyan/40 tracking-[0.25em]">TERMINAL</span>
+        {model && (
+          <span
+            className="text-mono text-[9px] text-jarvis-cyan/55 tracking-wide truncate max-w-[160px] px-1.5 py-0.5 rounded-lg"
+            style={{ boxShadow: "inset 0 0 0 1px rgba(125,211,252,0.18)" }}
+            title={model}
+          >
+            {model}
+          </span>
+        )}
       </div>
-      <div className="text-mono text-[10px] text-jarvis-ice/35">/help</div>
+      <div className="text-mono text-[10px] text-jarvis-ice/35 shrink-0">/help</div>
       <div className="absolute bottom-0 left-3 right-3 glass-divider" />
     </div>
   );

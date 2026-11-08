@@ -216,6 +216,7 @@ async def speech_to_text(audio: UploadFile = File(...)):
         compression_ratio_threshold=2.4,
         temperature=0.0,
         initial_prompt=(
+            "Hey JARVIS. Hey Jarvis. OK Jarvis. "
             "JARVIS command. Search, generate image, open page, run code, "
             "show news, list videos, open the file."
         ),
@@ -427,6 +428,58 @@ class ImageModelSelectBody(BaseModel):
     model: str
 
 
+class LlmModelSelectBody(BaseModel):
+    model: str
+
+
+@router.get("/barehands/status")
+async def barehands_status(request: Request):
+    cfg = request.app.state.cfg
+    from ..integrations import barehands_mgr as bh
+    bh_cfg = getattr(cfg, "barehands", None)
+    if bh_cfg is not None:
+        bh.configure(
+            cfg.project_root,
+            port=int(getattr(bh_cfg, "port", 8794) or 8794),
+            path=getattr(bh_cfg, "path", None) or "integrations/barehands",
+        )
+    st = bh.status()
+    st["enabled"] = bool(getattr(bh_cfg, "enabled", True)) if bh_cfg else True
+    st["keywords"] = list(getattr(bh_cfg, "keywords", []) or []) if bh_cfg else []
+    return st
+
+
+@router.post("/barehands/open")
+async def barehands_open_endpoint(request: Request):
+    cfg = request.app.state.cfg
+    from ..integrations import barehands_mgr as bh
+    bh_cfg = getattr(cfg, "barehands", None)
+    if bh_cfg is not None and not getattr(bh_cfg, "enabled", True):
+        return JSONResponse({"ok": False, "error": "barehands disabled in config"}, status_code=400)
+    if bh_cfg is not None:
+        bh.configure(
+            cfg.project_root,
+            port=int(getattr(bh_cfg, "port", 8794) or 8794),
+            path=getattr(bh_cfg, "path", None) or "integrations/barehands",
+        )
+    try:
+        st = bh.ensure_running()
+        bh.set_ring_state("listening")
+        return {"ok": True, **st}
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
+@router.post("/barehands/close")
+async def barehands_close_endpoint(request: Request):
+    from ..integrations import barehands_mgr as bh
+    try:
+        bh.set_ring_state("idle")
+        return {"ok": True, **bh.status()}
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
 @router.get("/image-models")
 async def image_models(request: Request):
     cfg = request.app.state.cfg
@@ -442,6 +495,137 @@ async def select_image_model_endpoint(request: Request, body: ImageModelSelectBo
         return {"ok": True, **select_image_model(cfg, body.model)}
     except Exception as e:  # noqa: BLE001
         return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
+
+@router.get("/models")
+async def list_llm_models(request: Request):
+    """Curated model assortment + installed endpoint models + hardware fit."""
+    cfg = request.app.state.cfg
+    selected = cfg.model.model
+    installed: list[str] = []
+    endpoint = (cfg.model.endpoint or "").rstrip("/")
+    if endpoint:
+        try:
+            headers = {}
+            key = cfg.model.api_key
+            if key:
+                headers["Authorization"] = f"Bearer {key}"
+            async with httpx.AsyncClient(timeout=6.0) as client:
+                r = await client.get(f"{endpoint}/models", headers=headers)
+                if r.status_code == 200:
+                    data = r.json()
+                    for item in data.get("data") or data.get("models") or []:
+                        mid = item.get("id") or item.get("name") or item.get("model")
+                        if mid and mid not in installed:
+                            installed.append(mid)
+        except Exception as e:  # noqa: BLE001
+            logging.getLogger("jarvis.api").warning("list models failed: %s", e)
+
+    from ..core.model_catalog import detect_gpu, enrich_catalog
+
+    gpu = detect_gpu()
+    payload = enrich_catalog(
+        installed_ids=installed,
+        gpu_total_gb=gpu.get("vram_gb"),
+        gpu_name=gpu.get("gpu_name"),
+        selected=selected,
+        gpu_vendor=gpu.get("vendor"),
+        shared_memory=bool(gpu.get("shared_memory")),
+    )
+    payload.update({
+        "provider": cfg.model.provider,
+        "endpoint": cfg.model.endpoint,
+        "installed": installed,
+    })
+    return payload
+
+
+@router.post("/models/select")
+async def select_llm_model(request: Request, body: LlmModelSelectBody):
+    """Hot-swap the active chat model (+ cloud/local endpoint route)."""
+    cfg = request.app.state.cfg
+    name = (body.model or "").strip()
+    if not name:
+        return JSONResponse({"ok": False, "error": "model required"}, status_code=400)
+
+    from ..core.model_catalog import cloud_key_configured, catalog_entry, resolve_model_route
+
+    entry = catalog_entry(name)
+    if entry and entry.get("cloud") and not cloud_key_configured(entry):
+        env_name = entry.get("api_key_env") or "XAI_API_KEY"
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": (
+                    f"Cloud model needs {env_name} in .env — "
+                    f"get a key at https://console.x.ai then restart JARVIS."
+                ),
+            },
+            status_code=400,
+        )
+
+    # If we're currently on a local endpoint, remember it before jumping to cloud.
+    cur_ep = (cfg.model.endpoint or "").rstrip("/")
+    if "api.x.ai" not in cur_ep and ("localhost" in cur_ep or "127.0.0.1" in cur_ep):
+        cfg.model.local_endpoint = cur_ep or cfg.model.local_endpoint
+        if cfg.model.api_key_env and cfg.model.api_key_env != "XAI_API_KEY":
+            cfg.model.local_api_key_env = cfg.model.api_key_env
+
+    route = resolve_model_route(
+        name,
+        local_endpoint=cfg.model.local_endpoint,
+        local_api_key_env=cfg.model.local_api_key_env,
+    )
+    cfg.model.model = route["model"]
+    cfg.model.endpoint = route["endpoint"]
+    cfg.model.api_key_env = route["api_key_env"]
+
+    # Surgical persist under the top-level `model:` block.
+    persisted = False
+    try:
+        from ..config import DEFAULT_CONFIG_PATH
+        path = DEFAULT_CONFIG_PATH
+        text = path.read_text(encoding="utf-8")
+
+        def _set_field(src: str, key: str, value: str) -> tuple[str, int]:
+            return re.subn(
+                rf"(?m)^(model:\s*\n(?:  .*\n)*?  {re.escape(key)}:\s*)([^\n#]+)",
+                lambda m: m.group(1) + value,
+                src,
+                count=1,
+            )
+
+        updated, n1 = _set_field(text, "model", route["model"])
+        updated, n2 = _set_field(updated, "endpoint", route["endpoint"])
+        updated, n3 = _set_field(updated, "api_key_env", route["api_key_env"])
+        # Ensure local_* keys exist for round-trips (insert after api_key_env if missing).
+        if "local_endpoint:" not in updated.split("image_model:", 1)[0]:
+            updated, _ = re.subn(
+                r"(?m)^(model:\s*\n(?:  .*\n)*?  api_key_env:\s*[^\n]+\n)",
+                (
+                    r"\1"
+                    f"  local_endpoint: {cfg.model.local_endpoint}\n"
+                    f"  local_api_key_env: {cfg.model.local_api_key_env}\n"
+                ),
+                updated,
+                count=1,
+            )
+        else:
+            updated, _ = _set_field(updated, "local_endpoint", cfg.model.local_endpoint)
+            updated, _ = _set_field(updated, "local_api_key_env", cfg.model.local_api_key_env)
+        if n1 or n2 or n3:
+            path.write_text(updated, encoding="utf-8")
+            persisted = True
+    except Exception as e:  # noqa: BLE001
+        logging.getLogger("jarvis.api").warning("persist model failed: %s", e)
+    return {
+        "ok": True,
+        "selected": route["model"],
+        "endpoint": route["endpoint"],
+        "api_key_env": route["api_key_env"],
+        "cloud": route["cloud"],
+        "persisted": persisted,
+    }
 
 
 @router.get("/stats")
@@ -474,6 +658,10 @@ async def stats(request: Request):
 _gpu_log = logging.getLogger("jarvis.gpu")
 _pynvml = None
 _pynvml_failed = False
+_gpu_win_cache: dict = {"t": 0.0, "data": None}
+_GPU_WIN_TTL_S = 1.25
+# Get-Counter over hundreds of GPU Engine instances can take several seconds.
+_GPU_WIN_PS_TIMEOUT_S = 12
 
 
 def _try_pynvml():
@@ -488,12 +676,127 @@ def _try_pynvml():
         return _pynvml
     except Exception as e:  # noqa: BLE001
         _pynvml_failed = True
-        _gpu_log.info("pynvml unavailable (%s) — falling back to nvidia-smi", e)
+        _gpu_log.info("pynvml unavailable (%s) — falling back to nvidia-smi / Windows", e)
         return None
 
 
+def _ollama_resident_vram_gb() -> float | None:
+    """Bytes currently held by Ollama runners (VRAM or shared), if any."""
+    try:
+        with httpx.Client(timeout=0.6) as client:
+            r = client.get("http://127.0.0.1:11434/api/ps")
+            if r.status_code != 200:
+                return None
+            total = 0
+            for m in (r.json() or {}).get("models") or []:
+                total += int(m.get("size_vram") or 0) or int(m.get("size") or 0)
+            return (total / 1e9) if total else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _read_gpu_windows() -> dict:
+    """AMD / Intel / any Windows GPU via performance counters + adapter probe.
+
+    NVIDIA path is preferred when available; this covers iGPUs that NVML misses.
+    """
+    import subprocess
+    import time
+
+    now = time.monotonic()
+    cached = _gpu_win_cache.get("data")
+    if cached is not None and (now - float(_gpu_win_cache.get("t") or 0)) < _GPU_WIN_TTL_S:
+        return cached
+
+    try:
+        from ..core.model_catalog import detect_gpu
+
+        info = detect_gpu()
+    except Exception as e:  # noqa: BLE001
+        _gpu_log.debug("detect_gpu failed: %s", e)
+        info = {"has_gpu": False}
+
+    if not info.get("has_gpu"):
+        data = {"available": False}
+        _gpu_win_cache["t"] = now
+        _gpu_win_cache["data"] = data
+        return data
+
+    load = 0.0
+    dedicated_gb = 0.0
+    shared_gb = 0.0
+    counters_ok = False
+    try:
+        # One PowerShell hop: max 3D/Compute util + adapter memory counters.
+        # Include engtype_compute (lowercase / spaced instance names on AMD).
+        ps = r"""
+$load = 0.0
+$samples = @()
+try { $samples = (Get-Counter '\GPU Engine(*)\Utilization Percentage' -ErrorAction Stop).CounterSamples } catch {}
+foreach ($s in $samples) {
+  $p = [string]$s.Path
+  if ($p -match 'engtype_3D' -or $p -match 'engtype_[Cc]ompute') {
+    if ($s.CookedValue -gt $load) { $load = [double]$s.CookedValue }
+  }
+}
+$ded = 0.0; $shr = 0.0
+try {
+  $mem = (Get-Counter '\GPU Adapter Memory(*)\Dedicated Usage','\GPU Adapter Memory(*)\Shared Usage' -ErrorAction Stop).CounterSamples
+  foreach ($s in $mem) {
+    $p = [string]$s.Path
+    if ($p -match 'dedicated usage') { $ded += [double]$s.CookedValue }
+    elseif ($p -match 'shared usage') { $shr += [double]$s.CookedValue }
+  }
+} catch {}
+@{ load = $load; dedicated = $ded; shared = $shr; sampleCount = @($samples).Count } | ConvertTo-Json -Compress
+"""
+        out = subprocess.check_output(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+            timeout=_GPU_WIN_PS_TIMEOUT_S,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+        parsed = json.loads(out or "{}")
+        load = float(parsed.get("load") or 0.0)
+        dedicated_gb = float(parsed.get("dedicated") or 0.0) / (1024.0**3)
+        shared_gb = float(parsed.get("shared") or 0.0) / (1024.0**3)
+        counters_ok = True
+    except Exception as e:  # noqa: BLE001
+        _gpu_log.debug("windows gpu counters failed: %s", e)
+        # Keep last good sample rather than flashing 0% on slow counter polls.
+        prev = _gpu_win_cache.get("data")
+        if isinstance(prev, dict) and prev.get("available"):
+            _gpu_win_cache["t"] = now
+            return prev
+
+    mem_total = float(info.get("vram_gb") or 0.0) or None
+    mem_used = _ollama_resident_vram_gb()
+    if mem_used is None:
+        mem_used = dedicated_gb + shared_gb if (dedicated_gb + shared_gb) > 0 else None
+    mem_percent = None
+    if mem_total and mem_total > 0 and mem_used is not None:
+        mem_percent = max(0.0, min(100.0, (mem_used / mem_total) * 100.0))
+
+    data = {
+        "available": True,
+        "source": "windows",
+        "name": info.get("gpu_name") or "GPU",
+        "vendor": info.get("vendor"),
+        "shared_memory": bool(info.get("shared_memory")),
+        "load_percent": max(0.0, min(100.0, load)),
+        "mem_percent": mem_percent if mem_percent is not None else 0.0,
+        "mem_used_gb": float(mem_used or 0.0),
+        "mem_total_gb": float(mem_total or 0.0),
+        "temp_c": None,
+        "counters_ok": counters_ok,
+    }
+    _gpu_win_cache["t"] = now
+    _gpu_win_cache["data"] = data
+    return data
+
+
 def _read_gpu() -> dict:
-    """Read GPU utilisation via NVML (preferred) or nvidia-smi fallback.
+    """Read GPU utilisation: NVIDIA NVML/smi first, then Windows AMD/Intel counters.
 
     Returns:
       {available, name, load_percent, mem_percent, mem_used_gb, mem_total_gb, temp_c}
@@ -503,7 +806,7 @@ def _read_gpu() -> dict:
         try:
             count = nv.nvmlDeviceGetCount()
             if count == 0:
-                return {"available": False}
+                return _read_gpu_windows()
             h = nv.nvmlDeviceGetHandleByIndex(0)
             util = nv.nvmlDeviceGetUtilizationRates(h)
             meminfo = nv.nvmlDeviceGetMemoryInfo(h)
@@ -528,32 +831,31 @@ def _read_gpu() -> dict:
             _gpu_log.debug("nvml query failed: %s", e)
     # nvidia-smi fallback
     smi = shutil.which("nvidia-smi")
-    if not smi:
-        return {"available": False}
-    try:
-        import subprocess
-        out = subprocess.check_output(
-            [smi, "--query-gpu=name,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu",
-             "--format=csv,noheader,nounits"],
-            timeout=2, text=True, stderr=subprocess.DEVNULL,
-        )
-        line = out.strip().splitlines()[0]
-        parts = [p.strip() for p in line.split(",")]
-        if len(parts) < 6:
-            return {"available": False}
-        return {
-            "available":    True,
-            "source":       "nvidia-smi",
-            "name":         parts[0],
-            "load_percent": float(parts[1] or 0),
-            "mem_percent":  float(parts[2] or 0),
-            "mem_used_gb":  float(parts[3] or 0) / 1024.0,
-            "mem_total_gb": float(parts[4] or 0) / 1024.0,
-            "temp_c":       float(parts[5] or 0),
-        }
-    except Exception as e:  # noqa: BLE001
-        _gpu_log.debug("nvidia-smi fallback failed: %s", e)
-        return {"available": False}
+    if smi:
+        try:
+            import subprocess
+            out = subprocess.check_output(
+                [smi, "--query-gpu=name,utilization.gpu,utilization.memory,memory.used,memory.total,temperature.gpu",
+                 "--format=csv,noheader,nounits"],
+                timeout=2, text=True, stderr=subprocess.DEVNULL,
+            )
+            line = out.strip().splitlines()[0]
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) >= 6:
+                return {
+                    "available":    True,
+                    "source":       "nvidia-smi",
+                    "name":         parts[0],
+                    "load_percent": float(parts[1] or 0),
+                    "mem_percent":  float(parts[2] or 0),
+                    "mem_used_gb":  float(parts[3] or 0) / 1024.0,
+                    "mem_total_gb": float(parts[4] or 0) / 1024.0,
+                    "temp_c":       float(parts[5] or 0),
+                }
+        except Exception as e:  # noqa: BLE001
+            _gpu_log.debug("nvidia-smi fallback failed: %s", e)
+
+    return _read_gpu_windows()
 
 
 @router.post("/upload")
@@ -772,18 +1074,17 @@ async def tts_status(request: Request):
     riva_ready = _riva_enabled(cfg) and riva_client_available
     piper_ready = _piper_available(cfg)
 
+    # UI always presents a single JARVIS voice. Prefer Piper (the MCU-style
+    # model); fall back to availability flags for diagnostics only.
     if piper_ready:
-        provider, label, voice, lang = "piper", "JARVIS (Piper, community model)", "jarvis", "en-GB"
+        provider, label, voice, lang = "piper", "JARVIS", "jarvis", "en-GB"
     elif riva_ready:
-        provider, label, voice, lang = "nvidia-riva", "NVIDIA Riva / Jarvis TTS", cfg.voice.riva_voice, cfg.voice.riva_language_code
+        provider, label, voice, lang = "nvidia-riva", "JARVIS", cfg.voice.riva_voice, cfg.voice.riva_language_code
     else:
-        provider = "edge-tts"
-        label = "Microsoft Ryan Neural (British male)"
-        voice = cfg.voice.edge_voice
-        lang = "en-GB"
+        provider, label, voice, lang = "edge-tts", "JARVIS", cfg.voice.edge_voice, "en-GB"
 
     return {
-        "available": edge_available or riva_ready or piper_ready,
+        "available": piper_ready or riva_ready or edge_available,
         "provider": provider,
         "requested_provider": cfg.voice.provider,
         "voice": voice,
@@ -836,44 +1137,28 @@ async def tts(request: Request, body: TTSBody):
     text = text[:1800]
     tts_log = logging.getLogger("jarvis.tts")
 
-    # 1. Piper — community JARVIS model (closest to MCU voice).
+    # JARVIS voice only — Piper community model. No Edge/Riva fallback so the
+    # spoken voice never switches to a different persona mid-session.
     if _should_try_piper(cfg):
         try:
             audio = _synthesize_with_piper(text, cfg)
             return Response(audio, media_type="audio/wav", headers={"X-JARVIS-TTS": "piper"})
         except Exception as e:  # noqa: BLE001
-            tts_log.warning("Piper TTS failed (%s) — falling back", e)
+            tts_log.warning("Piper TTS failed (%s)", e)
+            return JSONResponse(
+                {"ok": False, "error": f"JARVIS voice unavailable: {e}"},
+                status_code=503,
+            )
 
-    # 2. Riva (NVIDIA cloud)
-    if _should_try_riva(cfg):
-        try:
-            audio = _synthesize_with_riva(text, cfg)
-            return Response(audio, media_type="audio/wav", headers={"X-JARVIS-TTS": "riva"})
-        except Exception as e:  # noqa: BLE001
-            tts_log.warning("Riva TTS failed (%s) — falling back to edge-tts", e)
-
-    # 3. Edge TTS (Microsoft Ryan / Thomas Neural)
-    voice = body.voice or cfg.voice.edge_voice or "en-GB-ThomasNeural"
-    rate  = cfg.voice.edge_rate  or "-6%"
-    pitch = cfg.voice.edge_pitch or "+0Hz"
-    try:
-        import edge_tts
-    except Exception as e:  # noqa: BLE001
-        return JSONResponse(
-            {"ok": False, "error": f"edge-tts unavailable: {e}"},
-            status_code=503,
-        )
-
-    async def stream_audio():
-        communicate = edge_tts.Communicate(text, voice=voice, rate=rate, pitch=pitch)
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                yield chunk["data"]
-
-    return StreamingResponse(
-        stream_audio(),
-        media_type="audio/mpeg",
-        headers={"X-JARVIS-TTS": "edge"},
+    return JSONResponse(
+        {
+            "ok": False,
+            "error": (
+                "JARVIS voice (Piper) is not available. "
+                "Install piper-tts and place en_GB-jarvis-medium.onnx at data/voices/jarvis.onnx."
+            ),
+        },
+        status_code=503,
     )
 
 

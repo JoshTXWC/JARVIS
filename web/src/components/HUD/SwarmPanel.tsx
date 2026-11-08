@@ -70,7 +70,7 @@ export default function SwarmPanel() {
                 <div className="flex items-center justify-between px-3 py-1.5 border-b border-jarvis-cyan/10">
                   <div className="flex items-center gap-2 text-mono text-[10px] uppercase tracking-[0.2em]">
                     <span className={run.active ? "text-jarvis-aqua animate-pulse" : "text-jarvis-ice/55"}>
-                      ⌬ swarm × {run.tasks.length}
+                      ⌬ swarm · {run.tasks.length}
                     </span>
                     <span className="text-jarvis-ice/35 tabular-nums">
                       {done}/{run.tasks.length}{failed > 0 ? ` · ${failed} fail` : ""}
@@ -79,10 +79,10 @@ export default function SwarmPanel() {
                   {!run.active && (
                     <button
                       onClick={() => dismiss(run.id)}
-                      className="text-mono text-[10px] text-jarvis-ice/40 hover:text-jarvis-danger transition-colors"
+                      className="text-mono text-[9px] tracking-[0.18em] uppercase text-jarvis-ice/40 hover:text-jarvis-ice transition-colors"
                       title="Dismiss"
                     >
-                      ×
+                      clear
                     </button>
                   )}
                 </div>

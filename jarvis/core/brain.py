@@ -13,6 +13,7 @@ The orchestrator does NOT see the difference — both paths return a list of
 """
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import re
@@ -24,6 +25,12 @@ import httpx
 from ..config import Config
 
 log = logging.getLogger("jarvis.brain")
+
+# Per-request model override (Smart Auto). Context-local so concurrent
+# turns cannot clobber each other.
+_model_override: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "jarvis_model_override", default=None
+)
 
 
 TOOL_CALL_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
@@ -76,6 +83,19 @@ class LLMBrain:
 
     async def aclose(self) -> None:
         await self._client.aclose()
+
+    @property
+    def active_model(self) -> str:
+        """Configured model, or the Smart Auto override for this request."""
+        override = _model_override.get()
+        return override or self.mc.model
+
+    def set_model_override(self, model: str | None) -> contextvars.Token:
+        """Temporarily route LLM calls to `model`. Returns a reset token."""
+        return _model_override.set(model)
+
+    def reset_model_override(self, token: contextvars.Token) -> None:
+        _model_override.reset(token)
 
     # ------------------------------------------------------------------
     def build_system_prompt(self, persona: str, tools_doc: str) -> str:
@@ -134,7 +154,7 @@ class LLMBrain:
         norm_msgs = _normalise_messages(messages)
 
         payload: dict[str, Any] = {
-            "model": self.mc.model,
+            "model": self.active_model,
             "messages": norm_msgs,
             "temperature": self.mc.temperature,
             "max_tokens": self.mc.max_tokens,
@@ -208,7 +228,7 @@ class LLMBrain:
 
         norm_msgs = _normalise_messages(messages)
         payload: dict[str, Any] = {
-            "model": self.mc.model,
+            "model": self.active_model,
             "messages": norm_msgs,
             "temperature": self.mc.temperature,
             "max_tokens": self.mc.max_tokens,
@@ -339,7 +359,7 @@ class LLMBrain:
                 conv.append({"role": m["role"], "content": m["content"]})
 
         payload: dict[str, Any] = {
-            "model": self.mc.model,
+            "model": self.active_model,
             "system": system_text,
             "messages": conv,
             "max_tokens": self.mc.max_tokens,

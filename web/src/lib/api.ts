@@ -6,6 +6,31 @@ export async function getHealth(): Promise<Health> {
   return r.json();
 }
 
+export async function openBarehands(): Promise<{
+  ok: boolean;
+  url?: string;
+  error?: string;
+  running?: boolean;
+}> {
+  const r = await fetch("/api/barehands/open", { method: "POST" });
+  return r.json();
+}
+
+export async function closeBarehands(): Promise<{ ok: boolean; error?: string }> {
+  const r = await fetch("/api/barehands/close", { method: "POST" });
+  return r.json();
+}
+
+export async function getBarehandsStatus(): Promise<{
+  enabled?: boolean;
+  running?: boolean;
+  url?: string;
+  keywords?: string[];
+}> {
+  const r = await fetch("/api/barehands/status");
+  return r.json();
+}
+
 export async function getStats(): Promise<SystemStats> {
   const r = await fetch("/api/stats");
   return r.json();
@@ -63,6 +88,73 @@ export async function getImageModels(): Promise<{ selected: string; models: Imag
 
 export async function selectImageModel(model: string): Promise<{ ok: boolean; selected?: string; error?: string }> {
   const r = await fetch("/api/image-models/select", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model }),
+  });
+  return r.json();
+}
+
+export interface LlmModelInfo {
+  id: string;
+  label?: string;
+  skill?: string;
+  skill_label?: string;
+  vram_gb?: number;
+  ram_gb?: number;
+  tier?: string;
+  best_for?: string[];
+  needs?: string;
+  pull?: string | null;
+  tool_calling?: string;
+  recommended?: boolean;
+  summary?: string;
+  installed?: boolean;
+  installed_id?: string;
+  fit?: "fits" | "tight" | "heavy" | "cpu" | string;
+  fit_label?: string;
+  active?: boolean;
+  owned_by?: string;
+  cloud?: boolean;
+  section?: string;
+  provider_label?: string;
+  api_key_env?: string;
+}
+
+export interface LlmModelsResponse {
+  selected: string;
+  provider: string;
+  endpoint: string;
+  auto?: boolean;
+  installed?: string[];
+  recommended_ids?: string[];
+  cloud_ids?: string[];
+  hardware?: {
+    gpu_name?: string | null;
+    vram_gb?: number | null;
+    has_gpu?: boolean;
+    vendor?: string | null;
+    shared_memory?: boolean;
+  };
+  skills?: { id: string; label: string }[];
+  models: LlmModelInfo[];
+}
+
+export async function getLlmModels(): Promise<LlmModelsResponse> {
+  const r = await fetch("/api/models");
+  return r.json();
+}
+
+export async function selectLlmModel(model: string): Promise<{
+  ok: boolean;
+  selected?: string;
+  endpoint?: string;
+  api_key_env?: string;
+  cloud?: boolean;
+  persisted?: boolean;
+  error?: string;
+}> {
+  const r = await fetch("/api/models/select", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ model }),

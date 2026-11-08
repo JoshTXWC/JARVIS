@@ -37,6 +37,13 @@ TripoSR/
 stable-fast-3d/
 output/
 
+# barehands user config + runtime log (clone itself is kept)
+integrations/barehands/barehands.json
+integrations/barehands/jarvis-barehands.log
+integrations/barehands/state/state
+integrations/barehands/state/mood.json
+integrations/barehands/state/wave.json
+
 # Runtime logs
 *.log
 

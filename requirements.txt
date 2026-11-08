@@ -15,6 +15,10 @@ rich>=13.7.0
 edge-tts>=6.1.12                  # online Microsoft neural TTS fallback (en-GB Ryan / Thomas)
 piper-tts>=1.4.2                  # local JARVIS voice (jgkawell/jarvis ONNX)
 faster-whisper>=1.0.0             # server-side STT
+# faster-whisper 1.2.1 still passes metadata_errors= to av.open(); PyAV 19
+# removed that kwarg. Pin until a faster-whisper release includes the fix
+# (SYSTRAN/faster-whisper#1495). Drop this pin after upgrading past 1.2.1.
+av>=11,<19
 nvidia-riva-client>=2.25.0        # optional NVIDIA Riva cloud TTS
 SpeechRecognition>=3.10.0         # optional voice_tools listen/microphone_status
 pyttsx3>=2.90                     # optional voice_tools local speak fallback

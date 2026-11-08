@@ -375,6 +375,12 @@ async def _emit_event(send, ev: Event, pending: dict[str, asyncio.Future]) -> No
         if ev.text and "summary" not in msg:
             msg["summary"] = ev.text
         await send(msg)
+    elif ev.kind is EventKind.UI:
+        msg = {"type": "ui"}
+        msg.update(ev.payload or {})
+        if ev.text and "action" not in msg:
+            msg["action"] = ev.text
+        await send(msg)
     elif ev.kind is EventKind.PLAN:
         await send({"type": "plan", "text": ev.text, "steps": ev.payload.get("steps", [])})
     elif ev.kind is EventKind.SUGGESTIONS:

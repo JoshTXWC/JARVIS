@@ -122,9 +122,9 @@ export default function TerminalPanel() {
           <button
             onClick={() => setLogs([])}
             title="Clear"
-            className="text-mono text-[9px] px-1.5 py-0.5 rounded-md text-jarvis-ice/35 hover:text-jarvis-danger transition-colors"
+            className="text-mono text-[9px] px-1.5 py-0.5 rounded-md tracking-[0.15em] text-jarvis-ice/35 hover:text-jarvis-ice transition-colors"
           >
-            ×
+            CLR
           </button>
         </div>
       </div>

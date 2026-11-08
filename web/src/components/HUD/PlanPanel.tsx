@@ -39,10 +39,10 @@ export default function PlanPanel() {
         {plan.complete && (
           <button
             onClick={clearPlan}
-            className="text-mono text-[10px] text-jarvis-ice/40 hover:text-jarvis-danger transition-colors"
+            className="text-mono text-[9px] tracking-[0.18em] uppercase text-jarvis-ice/40 hover:text-jarvis-ice transition-colors"
             title="Dismiss"
           >
-            ×
+            clear
           </button>
         )}
       </div>

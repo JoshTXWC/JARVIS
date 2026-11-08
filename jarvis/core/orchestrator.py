@@ -37,6 +37,7 @@ from .responses import core_reply
 from .style import clean_assistant_text, is_malformed_reply
 
 MEDIA_PREFIX = "__JARVIS_MEDIA__"
+UI_PREFIX = "__JARVIS_UI__"
 
 log = logging.getLogger("jarvis.orchestrator")
 
@@ -108,6 +109,7 @@ class Orchestrator:
         # JSON payload into a proper MEDIA event. This is what makes
         # web_search / image_search / video_search render inline.
         self.hooks.add_emit(self._media_emit_hook)
+        self.hooks.add_emit(self._ui_emit_hook)
 
     async def _media_emit_hook(self, tool: str, args: dict, ok: bool, result):
         if not ok or not isinstance(result, str) or not result.startswith(MEDIA_PREFIX):
@@ -119,6 +121,20 @@ class Orchestrator:
         payload["tool"] = tool
         payload["args"] = args
         return [Event(EventKind.MEDIA, text=payload.get("summary", ""), payload=payload)]
+
+    async def _ui_emit_hook(self, tool: str, args: dict, ok: bool, result):
+        if not ok or not isinstance(result, str) or UI_PREFIX not in result:
+            return []
+        try:
+            idx = result.index(UI_PREFIX)
+            raw = result[idx + len(UI_PREFIX):].strip()
+            # Payload may sit on the same line or the rest of the string.
+            line = raw.split("\n", 1)[0].strip()
+            payload = json.loads(line)
+        except Exception:
+            return []
+        payload["tool"] = tool
+        return [Event(EventKind.UI, text=payload.get("action", "ui"), payload=payload)]
 
     # ------------------------------------------------------------------
     def _system_prompt(self) -> str:
@@ -408,6 +424,81 @@ class Orchestrator:
         user_text: str,
         attachments: list[dict] | None = None,
     ) -> AsyncIterator[Event]:
+        # Smart Auto: pick a concrete model for this turn, then restore.
+        override_token = None
+        routed = await self._maybe_route_model(user_text)
+        if routed:
+            override_token = self.brain.set_model_override(routed["model"])
+            capped = " · PC-capped" if routed.get("capped_by_pc") else ""
+            budget = routed.get("budget_gb")
+            budget_bit = f" · ≤{budget} GB" if budget is not None else ""
+            yield Event(
+                EventKind.INFO,
+                text=(
+                    f"auto → {routed['model']} "
+                    f"({routed['skill_label']}{budget_bit}{capped})"
+                ),
+            )
+
+        try:
+            async for ev in self._handle_user_message_inner(user_text, attachments):
+                yield ev
+        finally:
+            if override_token is not None:
+                self.brain.reset_model_override(override_token)
+
+    async def _maybe_route_model(self, user_text: str) -> dict | None:
+        """When selected model is `auto`, choose an installed model by skill."""
+        from .model_catalog import AUTO_MODEL_ID, pick_model_for
+
+        selected = (self.cfg.model.model or "").strip()
+        if selected.lower() != AUTO_MODEL_ID:
+            return None
+        installed = await self._list_endpoint_models()
+        gpu = self._gpu_vram_gb()
+        return pick_model_for(
+            user_text,
+            installed_ids=installed,
+            gpu_total_gb=gpu,
+            fallback="qwen2.5:3b",
+        )
+
+    async def _list_endpoint_models(self) -> list[str]:
+        """Best-effort list of model ids from the OpenAI-compatible endpoint."""
+        import httpx
+
+        endpoint = (self.cfg.model.endpoint or "").rstrip("/")
+        if not endpoint:
+            return []
+        try:
+            headers = {}
+            key = self.cfg.model.api_key
+            if key:
+                headers["Authorization"] = f"Bearer {key}"
+            async with httpx.AsyncClient(timeout=4.0) as client:
+                r = await client.get(f"{endpoint}/models", headers=headers)
+                if r.status_code != 200:
+                    return []
+                data = r.json()
+                ids: list[str] = []
+                for item in data.get("data") or data.get("models") or []:
+                    mid = item.get("id") or item.get("name") or item.get("model")
+                    if mid and mid not in ids:
+                        ids.append(mid)
+                return ids
+        except Exception:  # noqa: BLE001
+            return []
+
+    def _gpu_vram_gb(self) -> float | None:
+        from .model_catalog import detect_gpu_vram
+        vram, _ = detect_gpu_vram()
+        return vram
+
+    async def _handle_user_message_inner(
+        self,
+        user_text: str,
+        attachments: list[dict] | None = None,
+    ) -> AsyncIterator[Event]:
         self.memory.append_message("user", user_text)
         user_msg: dict = {"role": "user", "content": user_text}
         if attachments:
@@ -495,6 +586,11 @@ class Orchestrator:
         hop = 0
         promise_followups = 0
         reflections = 0
+        try:
+            from ..integrations import barehands_mgr as _bh
+            _bh.set_ring_state("thinking")
+        except Exception:  # noqa: BLE001
+            pass
         while hop < MAX_TOOL_HOPS:
             hop += 1
             yield Event(EventKind.THINKING, text="thinking...")
@@ -637,6 +733,11 @@ class Orchestrator:
                 chips = await self._suggest(user_text, assistant_text)
                 if chips:
                     yield Event(EventKind.SUGGESTIONS, payload={"items": chips})
+                try:
+                    from ..integrations import barehands_mgr as _bh
+                    _bh.set_ring_state("idle")
+                except Exception:  # noqa: BLE001
+                    pass
                 yield Event(EventKind.DONE)
                 return
 

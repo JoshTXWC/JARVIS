@@ -11,13 +11,11 @@ import Floating, { resetAllLayouts } from "./components/HUD/Floating";
 import MissionLog from "./components/HUD/MissionLog";
 import PlanPanel from "./components/HUD/PlanPanel";
 import Reticle from "./components/HUD/Reticle";
-import StatusBar from "./components/HUD/StatusBar";
 import Settings from "./components/HUD/Settings";
-import Subsystems from "./components/HUD/Subsystems";
 import SwarmPanel from "./components/HUD/SwarmPanel";
 import TopBar from "./components/HUD/TopBar";
+import BarehandsOverlay from "./components/HUD/BarehandsOverlay";
 import UptimePanel from "./components/HUD/UptimePanel";
-import Widget from "./components/HUD/Widget";
 import MediaHub from "./components/Media/MediaHub";
 import Orb from "./components/Orb/Orb";
 import ConfirmModal from "./components/Tools/ConfirmModal";
@@ -32,6 +30,7 @@ const ArticleReader = lazy(() => import("./components/Media/ArticleReader"));
 import { getHealth } from "./lib/api";
 import { useStore, nextId, type MediaKind } from "./lib/store";
 import { refreshVoiceProfile, streamSpeak } from "./lib/voice";
+import { startWakeListening } from "./lib/wakeMic";
 import { wsClient } from "./lib/ws";
 
 const GREETING_SESSION_KEY = "jarvis.greeting.sent.v1";
@@ -43,16 +42,15 @@ const GREETING_SESSION_KEY = "jarvis.greeting.sent.v1";
 function defaults() {
   const W = window.innerWidth;
   const H = window.innerHeight;
-  const M = 16;
-  const TOP = 76;
-  const BOTTOM = 48;
+  const M = 8;
+  const TOP = 66;
+  const BOTTOM = 46;
   const colL = 320;
   const colR = 380;
   const halfH = (H - TOP - BOTTOM - 8) / 2;
   return {
-    diag:      { x: M, y: TOP, w: colL, h: 260 },
-    subs:      { x: M, y: TOP + 268, w: colL, h: 360 },
-    terminal:  { x: M, y: TOP + 268 + 368, w: colL, h: Math.max(180, H - TOP - 268 - 368 - BOTTOM) },
+    diag:      { x: M, y: TOP, w: colL, h: 420 },
+    terminal:  { x: M, y: TOP + 428, w: colL, h: Math.max(180, H - TOP - 428 - BOTTOM) },
     uptime:    { x: M + colL + 12, y: TOP, w: 220, h: 136 },
     chat:      { x: W - colR - M, y: TOP, w: colR, h: halfH * 2 - 200 },
     mission:   { x: W - colR - M, y: H - BOTTOM - 200 - 8 - 110, w: colR, h: 110 },
@@ -62,7 +60,7 @@ function defaults() {
     // diagonally so they don't all stack at one spot; user can drag.
     swarm:       { x: 340,  y: 80,  w: 360, h: 320 },
     plan:        { x: 340,  y: 80,  w: 360, h: 300 },
-    settings:    { x: 380,  y: 120, w: 420, h: 540 },
+    settings:    { x: 380,  y: 100, w: 440, h: 580 },
     reader:      { x: 480,  y: 140, w: 720, h: 640 },
     images:      { x: 380,  y: 120, w: 640, h: 480 },
     videos:      { x: 420,  y: 160, w: 680, h: 460 },
@@ -74,7 +72,7 @@ function defaults() {
     memory:      { x: 660,  y: 400, w: 600, h: 520 },
     model3d:     { x: 700,  y: 200, w: 560, h: 520 },
 
-    cmd:       { x: (W - 760) / 2, y: H - BOTTOM - 100, w: 760, h: 72 },
+    cmd:       { x: (W - 860) / 2, y: H - BOTTOM - 118, w: 860, h: 96 },
   };
 }
 
@@ -107,8 +105,6 @@ function useViewport() {
 export default function App() {
   const setHealth = useStore((s) => s.setHealth);
   const media = useStore((s) => s.media);
-  const shellMode = useStore((s) => s.shellMode);
-  const setShellMode = useStore((s) => s.setShellMode);
   const viewport = useViewport();
   const hiddenRef = useRef(false);
   const lastMediaLenRef = useRef(0);
@@ -123,32 +119,58 @@ export default function App() {
     return () => clearInterval(id);
   }, [setHealth]);
 
-  // ── Electron integration: track shell mode + window visibility ──────────
+  // Resume wake listening after reload if the user left it enabled.
+  // Settings used to flip the flag without starting the mic — this heals that.
+  useEffect(() => {
+    let cancelled = false;
+    const tryResume = async () => {
+      if (cancelled) return;
+      const { wakeEnabled, micEnabled } = useStore.getState();
+      if (wakeEnabled && !micEnabled) {
+        try {
+          await startWakeListening();
+        } catch (e) {
+          console.warn("[wake] auto-resume failed:", e);
+        }
+      }
+    };
+    const persistApi = (useStore as typeof useStore & {
+      persist?: {
+        hasHydrated?: () => boolean;
+        onFinishHydration?: (cb: () => void) => () => void;
+      };
+    }).persist;
+    if (persistApi?.hasHydrated?.()) {
+      void tryResume();
+      return () => { cancelled = true; };
+    }
+    const unsub = persistApi?.onFinishHydration?.(() => { void tryResume(); });
+    // Fallback if persist API is unavailable.
+    if (!unsub) {
+      const t = setTimeout(() => { void tryResume(); }, 200);
+      return () => { cancelled = true; clearTimeout(t); };
+    }
+    return () => { cancelled = true; unsub(); };
+  }, []);
+
+  // ── Electron integration: track window visibility ───────────────────────
   useEffect(() => {
     const j = (window as any).jarvis;
     if (!j) return; // running in a plain browser — skip
 
-    // Sync the renderer's shellMode with whatever the main process reports.
-    j.invoke("jarvis:request-mode").then((mode: string | null) => {
-      if (mode === "widget" || mode === "full") setShellMode(mode);
-    }).catch(() => undefined);
-
-    const offMode = j.on("jarvis:mode-changed", (mode: string) => {
-      if (mode === "widget" || mode === "full") setShellMode(mode);
-    });
     const offVis = j.on("jarvis:visibility-changed", (visible: boolean) => {
       hiddenRef.current = !visible;
     });
-    return () => { offMode?.(); offVis?.(); };
-  }, [setShellMode]);
+    return () => { offVis?.(); };
+  }, []);
 
-  // ── Auto-popup widget when new media arrives while the window is hidden.
+  // ── Show window when new media arrives while hidden ─────────────────────
   useEffect(() => {
     const prev = lastMediaLenRef.current;
     const total = media.reduce((n, m) => n + (m.items?.length || 0), 0);
     if (total > prev && hiddenRef.current) {
       const j = (window as any).jarvis;
-      if (j) j.send("jarvis:set-widget-mode", true);
+      if (j) j.send("jarvis:show");
     }
     lastMediaLenRef.current = total;
   }, [media]);
@@ -199,22 +221,14 @@ export default function App() {
   const swarms = useStore((s) => s.swarms);
   const hasSwarms = swarms.length > 0;
   const hasPlan = useStore((s) => s.plan != null);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const layoutEdit = useStore((s) => s.layoutEdit);
+  const setLayoutEdit = useStore((s) => s.setLayoutEdit);
+  const dockedPanels = useStore((s) => s.dockedPanels);
+  const clearDockedPanels = useStore((s) => s.clearDockedPanels);
+  const visible = (id: string) => !dockedPanels.includes(id);
 
   // Helper: which hubs have at least 1 item?
   const has = (kinds: MediaKind[]) => media.some((m) => kinds.includes(m.kind));
-
-  // ── Widget mode — slim side panel, replaces the full HUD entirely.
-  if (shellMode === "widget") {
-    return (
-      <div className="relative w-screen h-screen overflow-hidden">
-        <Atmosphere />
-        <Widget />
-        <ConfirmModal />
-        <BootSequence />
-      </div>
-    );
-  }
 
   if (viewport.w < 900) {
     return (
@@ -223,9 +237,8 @@ export default function App() {
         <Orb />
         <CornerFrame />
         <TopBar />
-        <StatusBar />
 
-        <div className="fixed left-4 right-4 top-[76px] z-20 grid h-[136px] grid-cols-[minmax(0,1fr)_minmax(168px,190px)] gap-3 pointer-events-auto">
+        <div className="fixed left-2 right-2 top-[74px] z-20 grid h-[136px] grid-cols-[minmax(0,1fr)_minmax(168px,190px)] gap-3 pointer-events-auto">
           <div className="min-w-0 overflow-hidden">
             <DiagPanel />
           </div>
@@ -248,6 +261,7 @@ export default function App() {
         <ConfirmModal />
         <DropZone />
         <BootSequence />
+        <BarehandsOverlay />
       </div>
     );
   }
@@ -260,60 +274,83 @@ export default function App() {
       {/* Fixed HUD chrome — not draggable */}
       <CornerFrame />
       <TopBar />
-      <StatusBar />
 
-      {/* Reset-layout button (lower right corner near StatusBar) */}
-      <button
-        onClick={() => {
-          if (confirm("Reset all panel positions and sizes?")) resetAllLayouts();
-        }}
-        title="Reset layout"
-        className="fixed bottom-12 right-4 z-50 glass-chip hover:bg-jarvis-cyan/10 hover:text-jarvis-ice transition-colors"
-      >
-        ⟲ layout
-      </button>
+      {/* Layout / chrome controls */}
+      <div className="fixed bottom-2 right-2 z-50 flex items-center gap-2 pointer-events-auto">
+        <button
+          onClick={() => setLayoutEdit(!layoutEdit)}
+          title={layoutEdit ? "Done editing layout" : "Edit layout"}
+          className={`glass-chip transition-colors ${
+            layoutEdit
+              ? "bg-jarvis-cyan/20 text-jarvis-ice"
+              : "hover:bg-jarvis-cyan/10 hover:text-jarvis-ice"
+          }`}
+        >
+          Edit Layout
+        </button>
+      </div>
 
-      {/* Settings toggle */}
-      <button
-        onClick={() => setSettingsOpen((v) => !v)}
-        title="Settings"
-        className="fixed bottom-12 right-[200px] z-50 glass-chip hover:bg-jarvis-cyan/10 hover:text-jarvis-ice transition-colors"
-      >
-        ⚙ settings
-      </button>
-
-      {/* Collapse-to-widget button — slides into the side panel mode */}
-      <button
-        onClick={() => {
-          setShellMode("widget");
-          try { (window as any).jarvis?.send?.("jarvis:set-widget-mode", true); } catch { /* noop */ }
-        }}
-        title="Collapse to widget (Ctrl+Shift+J)"
-        className="fixed bottom-12 right-28 z-50 glass-chip hover:bg-jarvis-cyan/10 hover:text-jarvis-ice transition-colors"
-      >
-        ◱ widget
-      </button>
+      {layoutEdit && (
+        <div className="fixed bottom-[5.25rem] right-2 z-50 flex items-center gap-2 pointer-events-auto">
+          <button
+            onClick={() => {
+              if (!confirm("Reset all panel positions and sizes?")) return;
+              resetAllLayouts();
+            }}
+            title="Reset layout"
+            className="glass-chip hover:bg-jarvis-warn/15 hover:text-jarvis-warn transition-colors"
+          >
+            ⟲ reset layout
+          </button>
+          <button
+            onClick={() => {
+              if (!confirm("Open all docked panels onto the canvas?")) return;
+              clearDockedPanels();
+            }}
+            className="glass-chip hover:bg-jarvis-cyan/10 hover:text-jarvis-ice transition-colors"
+          >
+            open all
+          </button>
+          <button
+            onClick={() => setLayoutEdit(false)}
+            className="glass-chip hover:bg-jarvis-cyan/10 hover:text-jarvis-ice transition-colors"
+          >
+            done
+          </button>
+        </div>
+      )}
 
       {/* Floating, movable + resizable panels */}
-      <Floating id="diag"     defaultBox={D.diag}     minW={260} minH={180}><DiagPanel /></Floating>
-      <Floating id="uptime"   defaultBox={D.uptime}   minW={180} minH={118}><UptimePanel /></Floating>
-      <Floating id="subs"     defaultBox={D.subs}     minW={260} minH={220}><Subsystems /></Floating>
-      <Floating id="terminal" defaultBox={D.terminal} minW={260} minH={180}><TerminalPanel /></Floating>
+      {visible("diag") && (
+        <Floating id="diag" defaultBox={D.diag} minW={260} minH={160}><DiagPanel /></Floating>
+      )}
+      {visible("uptime") && (
+        <Floating id="uptime" defaultBox={D.uptime} minW={180} minH={118}><UptimePanel /></Floating>
+      )}
+      {visible("terminal") && (
+        <Floating id="terminal" defaultBox={D.terminal} minW={260} minH={180}><TerminalPanel /></Floating>
+      )}
 
-      <Floating id="chat"     defaultBox={D.chat}     minW={300} minH={260}><ChatPanel /></Floating>
-      <Floating id="mission"  defaultBox={D.mission}  minW={280} minH={90}><MissionLog /></Floating>
-      <Floating id="toolFeed" defaultBox={D.toolFeed} minW={280} minH={140}><ToolFeed /></Floating>
-      {hasSwarms && (
+      {visible("chat") && (
+        <Floating id="chat" defaultBox={D.chat} minW={300} minH={260}><ChatPanel /></Floating>
+      )}
+      {visible("mission") && (
+        <Floating id="mission" defaultBox={D.mission} minW={280} minH={90}><MissionLog /></Floating>
+      )}
+      {visible("toolFeed") && (
+        <Floating id="toolFeed" defaultBox={D.toolFeed} minW={280} minH={140}><ToolFeed /></Floating>
+      )}
+      {hasSwarms && visible("swarm") && (
         <Floating id="swarm" defaultBox={D.swarm} minW={300} minH={200} z={23}>
           <SwarmPanel />
         </Floating>
       )}
-      {hasPlan && (
+      {hasPlan && visible("plan") && (
         <Floating id="plan" defaultBox={D.plan} minW={300} minH={180} z={24}>
           <PlanPanel />
         </Floating>
       )}
-      {settingsOpen && (
+      {visible("settings") && (
         <Floating id="settings" defaultBox={D.settings} minW={340} minH={300} z={28}>
           <Settings />
         </Floating>
@@ -325,54 +362,54 @@ export default function App() {
       <PinnedReader defaultBox={D.reader} />
 
       {/* ── Per-kind media hubs. Each only renders when has items. ── */}
-      {has(["image"]) && (
+      {has(["image"]) && visible("hub.images") && (
         <Floating id="hub.images" defaultBox={D.images} minW={360} minH={260} z={22}>
           <MediaHub kinds={["image"]} title="IMAGE GEN" accent="#a5f3fc" />
         </Floating>
       )}
-      {has(["video", "videos"]) && (
+      {has(["video", "videos"]) && visible("hub.videos") && (
         <Floating id="hub.videos" defaultBox={D.videos} minW={360} minH={280} z={22}>
           <MediaHub kinds={["video", "videos"]} title="VIDEOS" accent="#fbbf24" />
         </Floating>
       )}
-      {has(["search"]) && (
+      {has(["search"]) && visible("hub.websearch") && (
         <Floating id="hub.websearch" defaultBox={D.websearch} minW={340} minH={260} z={22}>
           <MediaHub kinds={["search"]} title="WEB SEARCH" accent="#7dd3fc" />
         </Floating>
       )}
-      {has(["news"]) && (
+      {has(["news"]) && visible("hub.news") && (
         <Floating id="hub.news" defaultBox={D.news} minW={340} minH={260} z={22}>
           <MediaHub kinds={["news"]} title="NEWS" accent="#fca5a5" />
         </Floating>
       )}
-      {has(["images"]) && (
+      {has(["images"]) && visible("hub.imagesearch") && (
         <Floating id="hub.imagesearch" defaultBox={D.imagesearch} minW={360} minH={280} z={22}>
           <MediaHub kinds={["images"]} title="IMAGE SEARCH" accent="#7dd3fc" />
         </Floating>
       )}
-      {has(["page", "pdf"]) && (
+      {has(["page", "pdf"]) && visible("hub.pages") && (
         <Floating id="hub.pages" defaultBox={D.pages} minW={400} minH={320} z={22}>
           <MediaHub kinds={["page", "pdf"]} title="PAGES" accent="#bae6fd" />
         </Floating>
       )}
-      {has(["webcam"]) && (
+      {has(["webcam"]) && visible("hub.webcam") && (
         <Floating id="hub.webcam" defaultBox={D.webcam} minW={340} minH={260} z={22}>
           <MediaHub kinds={["webcam"]} title="CAMERA" accent="#fb7185" />
         </Floating>
       )}
-      {has(["galaxy"]) && (
+      {has(["galaxy"]) && visible("hub.memory") && (
         <Floating id="hub.memory" defaultBox={D.memory} minW={380} minH={320} z={22}>
           <MediaHub kinds={["galaxy"]} title="MEMORY" accent="#a78bfa" />
         </Floating>
       )}
-      {has(["model3d"]) && (
+      {has(["model3d"]) && visible("hub.model3d") && (
         <Floating id="hub.model3d" defaultBox={D.model3d} minW={360} minH={320} z={22}>
           <MediaHub kinds={["model3d"]} title="3D MODELS" accent="#bae6fd" />
         </Floating>
       )}
 
-      {/* Command bar — height auto-grows when images attached (so 3D/img2img/analyze visible) */}
-      <Floating id="cmd" defaultBox={D.cmd} minW={420} minH={72} autoHeight>
+      {/* Command bar — always present; not removable */}
+      <Floating id="cmd" defaultBox={D.cmd} minW={520} minH={88} autoHeight removable={false} overflowVisible>
         <CommandBar />
       </Floating>
 
@@ -384,6 +421,7 @@ export default function App() {
       <ConfirmModal />
       <DropZone />
       <BootSequence />
+      <BarehandsOverlay />
     </div>
   );
 }

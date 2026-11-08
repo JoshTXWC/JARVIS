@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
+import { DEFAULT_DOCKED } from "./dockCatalog";
 
 export type OrbState = "idle" | "listening" | "thinking" | "speaking";
 
@@ -53,6 +54,9 @@ export interface SystemStats {
   gpu?: {
     available: boolean;
     name?: string;
+    vendor?: string;
+    shared_memory?: boolean;
+    source?: string;
     load_percent?: number;
     mem_percent?: number;
     mem_used_gb?: number;
@@ -252,16 +256,34 @@ interface StoreState {
   clearSuggestions: () => void;
   terminalOpen: boolean;
   setTerminalOpen: (v: boolean) => void;
-  // Shell mode: "full" full HUD, "widget" compact side-panel for at-a-glance
-  // results when the main window is collapsed to the system tray.
-  shellMode: "full" | "widget";
-  setShellMode: (m: StoreState["shellMode"]) => void;
+  // Layout edit mode — reset helpers.
+  layoutEdit: boolean;
+  setLayoutEdit: (v: boolean) => void;
+  // Panels living in the centered icon dock (not on the canvas).
+  dockedPanels: string[];
+  dockPanel: (id: string) => void;
+  undockPanel: (id: string) => void;
+  clearDockedPanels: () => void;
+  // True while a dockable tile is dragged over the top dock zone.
+  dockHot: boolean;
+  setDockHot: (v: boolean) => void;
+  // Legacy aliases used by older restore paths.
+  hiddenPanels: string[];
+  hidePanel: (id: string) => void;
+  showPanel: (id: string) => void;
+  clearHiddenPanels: () => void;
   // Previous session: on a cold launch (reboot / app relaunch) the prior
   // chat/media/tools/swarms are stashed instead of auto-reopening. Restore is
   // on-demand only. Backend/semantic memory is unaffected.
   prevSessionAvailable: boolean;
   restoreLastSession: () => void;
   dismissLastSession: () => void;
+  // Barehands hand-tracked stage overlay (https://github.com/jaredrhod/barehands).
+  barehandsOpen: boolean;
+  barehandsUrl: string;
+  barehandsBusy: boolean;
+  setBarehandsOpen: (open: boolean, url?: string) => void;
+  setBarehandsBusy: (v: boolean) => void;
 }
 
 let _id = 0;
@@ -402,17 +424,37 @@ export const useStore = create<StoreState>()(persist((set) => ({
   expandMedia: (id, idx) =>
     set((st) => ({ media: st.media.map((m) => (m.id === id ? { ...m, expanded: idx } : m)) })),
   clearMedia: () => set({ media: [] }),
-  shellMode: ((): "full" | "widget" => {
-    try {
-      const v = localStorage.getItem("jarvis.shellMode");
-      if (v === "widget" || v === "full") return v;
-    } catch { /* noop */ }
-    return "full";
-  })(),
-  setShellMode: (m) => {
-    try { localStorage.setItem("jarvis.shellMode", m); } catch { /* noop */ }
-    set({ shellMode: m });
-  },
+  layoutEdit: false,
+  setLayoutEdit: (v) => set({ layoutEdit: v }),
+  dockedPanels: [...DEFAULT_DOCKED],
+  dockPanel: (id) =>
+    set((st) =>
+      st.dockedPanels.includes(id)
+        ? {}
+        : { dockedPanels: [...st.dockedPanels, id], dockHot: false },
+    ),
+  undockPanel: (id) =>
+    set((st) => ({
+      dockedPanels: st.dockedPanels.filter((p) => p !== id),
+      dockHot: false,
+    })),
+  clearDockedPanels: () => set({ dockedPanels: [], dockHot: false }),
+  dockHot: false,
+  setDockHot: (v) => set({ dockHot: v }),
+  // Legacy: map hide/show onto dock
+  hiddenPanels: [],
+  hidePanel: (id) =>
+    set((st) =>
+      st.dockedPanels.includes(id)
+        ? {}
+        : { dockedPanels: [...st.dockedPanels, id], dockHot: false },
+    ),
+  showPanel: (id) =>
+    set((st) => ({
+      dockedPanels: st.dockedPanels.filter((p) => p !== id),
+      dockHot: false,
+    })),
+  clearHiddenPanels: () => set({ dockedPanels: [], dockHot: false }),
   lightbox: null,
   setLightbox: (v) => set({ lightbox: v }),
   reader: null,
@@ -476,6 +518,16 @@ export const useStore = create<StoreState>()(persist((set) => ({
     try { localStorage.removeItem(PREV_SESSION_KEY); } catch { /* noop */ }
     set({ prevSessionAvailable: false });
   },
+  barehandsOpen: false,
+  barehandsUrl: "http://127.0.0.1:8794/stage.html",
+  barehandsBusy: false,
+  setBarehandsOpen: (open, url) =>
+    set((st) => ({
+      barehandsOpen: open,
+      barehandsUrl: url || st.barehandsUrl,
+      barehandsBusy: false,
+    })),
+  setBarehandsBusy: (v) => set({ barehandsBusy: v }),
 }), {
   // Persist only durable, user-meaningful slices. Ephemeral runtime state
   // (orb, audio levels, mic flags, transient overlays, attachments) lives
@@ -491,7 +543,7 @@ export const useStore = create<StoreState>()(persist((set) => ({
     voiceEnabled: state.voiceEnabled,
     bargeIn:      state.bargeIn,
     wakeEnabled:  state.wakeEnabled,
-    shellMode:    state.shellMode,
+    dockedPanels: state.dockedPanels,
   }),
   // After rehydrate, mark streaming chats as finalised (their stream never
   // resumes across a reload) and strip the lightbox/reader overlays.
@@ -500,6 +552,12 @@ export const useStore = create<StoreState>()(persist((set) => ({
     if (state.chat?.length) {
       state.chat = dedupeBootGreetings(state.chat.map((c) => ({ ...c, streaming: false })));
     }
+    // Migrate legacy hiddenPanels → dockedPanels if needed.
+    const anyState = state as typeof state & { hiddenPanels?: string[] };
+    if ((!state.dockedPanels || state.dockedPanels.length === 0) && anyState.hiddenPanels?.length) {
+      state.dockedPanels = [...anyState.hiddenPanels];
+    }
+    if (!state.dockedPanels) state.dockedPanels = [...DEFAULT_DOCKED];
     // Cold launch (reboot / app relaunch) vs in-app reload. No alive marker ⇒
     // fresh process ⇒ don't auto-reopen the prior session; stash it for an
     // on-demand restore and start clean. A reload keeps the marker and the

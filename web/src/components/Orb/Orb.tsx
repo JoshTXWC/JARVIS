@@ -31,6 +31,7 @@ const PALETTE: Record<OrbState, {
 
 export default function Orb() {
   const ref = useRef<HTMLDivElement>(null);
+  const barehandsOpen = useStore((s) => s.barehandsOpen);
   const cur = useRef({ cyan: PALETTE.idle.cyan, glow: PALETTE.idle.glow, amber: PALETTE.idle.amber, speed: 1, intensity: 0.85, audio: 0 });
 
   useEffect(() => {
@@ -62,10 +63,18 @@ export default function Orb() {
     return () => cancelAnimationFrame(raf);
   }, []);
 
+  // Barehands mode: park a compact orb in the bottom-left corner above the stage.
+  const shellClass = barehandsOpen
+    ? "fixed bottom-4 left-4 z-[95] pointer-events-none flex items-end justify-start"
+    : "absolute inset-0 pointer-events-none flex items-center justify-center";
+  const dialClass = barehandsOpen
+    ? "relative w-[min(148px,22vw)] aspect-square transition-[width] duration-500 ease-out"
+    : "relative w-[clamp(280px,38vmin,560px)] aspect-square transition-[width] duration-500 ease-out";
+
   return (
     <div
       ref={ref}
-      className="absolute inset-0 pointer-events-none flex items-center justify-center"
+      className={shellClass}
       style={{
         // Defaults so the CSS animations don't choke before first tick.
         ["--orb-cyan"  as any]: PALETTE.idle.cyan,
@@ -76,7 +85,7 @@ export default function Orb() {
         ["--orb-audio" as any]: 0,
       }}
     >
-      <div className="relative w-[clamp(280px,38vmin,560px)] aspect-square">
+      <div className={dialClass}>
         {/* Volumetric blue halo — breathes + brightens with voice */}
         <div
           className="absolute inset-0 rounded-full"

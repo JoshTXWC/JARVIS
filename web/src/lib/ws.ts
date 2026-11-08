@@ -290,6 +290,13 @@ class JarvisWS {
         st.pushMedia(card);
         break;
       }
+      case "ui": {
+        if (m.action === "barehands") {
+          if (m.open) st.setBarehandsOpen(true, m.url || undefined);
+          else st.setBarehandsOpen(false);
+        }
+        break;
+      }
       case "plan":
         st.setPlan({ text: m.text || "", steps: Array.isArray(m.steps) ? m.steps : [] });
         break;

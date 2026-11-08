@@ -500,11 +500,54 @@ def _build_run_cmd(m: re.Match) -> IntentMatch | None:
     )
 
 
+# Barehands — hand-tracked glass stage. Keyword + soft verbs.
+_BAREHANDS_OPEN_RE = re.compile(
+    r"^\s*(?:"
+    r"(?:open|launch|start|activate|enable|show|bring\s+up|pull\s+up)\s+)?"
+    r"(?:bare\s*-?\s*hands|barehands|hands?\s+mode|hand\s+tracking)"
+    r"(?:\s+(?:mode|stage|board|please))?"
+    r"\s*[.!?]*$",
+    re.IGNORECASE,
+)
+
+
+def _build_barehands_open(m: re.Match) -> IntentMatch | None:
+    return IntentMatch(
+        name="barehands_open",
+        tool_call=ToolCall("barehands_open", {}),
+        final_prefix="Barehands is online — allow the camera and wave, sir.",
+        raw_match=m.group(0),
+    )
+
+
+_BAREHANDS_CLOSE_RE = re.compile(
+    r"^\s*(?:"
+    r"(?:close|exit|dismiss|disable|stop|hide|quit)\s+"
+    r"(?:bare\s*-?\s*hands|barehands|hands?\s+mode|hand\s+tracking)"
+    r"|exit\s+hands(?:\s+mode)?"
+    r")\s*[.!?]*$",
+    re.IGNORECASE,
+)
+
+
+def _build_barehands_close(m: re.Match) -> IntentMatch | None:
+    return IntentMatch(
+        name="barehands_close",
+        tool_call=ToolCall("barehands_close", {}),
+        final_prefix="Barehands dismissed, sir.",
+        raw_match=m.group(0),
+    )
+
+
 # ────────────────────── master ordering ──────────────────────
 # First match wins. Media / search intents intentionally come BEFORE
 # browser_open so "show me news about X" never opens a visible browser.
 
 INTENTS: list[Intent] = [
+    Intent("barehands_open",     _BAREHANDS_OPEN_RE,     _build_barehands_open,
+           "Open the Barehands hand-tracked glass stage."),
+    Intent("barehands_close",    _BAREHANDS_CLOSE_RE,    _build_barehands_close,
+           "Close the Barehands stage."),
     Intent("text_to_3d",         _TEXT_TO_3D_RE,         _build_text_to_3d,
            "Generate a 3D model from a text prompt."),
     Intent("image_generate",     _IMAGE_GEN_RE,          _build_image_gen,

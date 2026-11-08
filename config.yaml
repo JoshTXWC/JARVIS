@@ -137,15 +137,22 @@ A:
 
 model:
   # OpenAI-compatible endpoint example. Point this at Ollama, LM Studio, vLLM,
-  # OpenAI, OpenRouter, or another compatible /v1 backend, then set `model`
-  # and `api_key_env` to match your provider.
+  # OpenAI, OpenRouter, xAI Grok, or another compatible /v1 backend, then set
+  # `model` and `api_key_env` to match your provider.
+  # Set model to `auto` for Smart Auto — JARVIS picks a light/coding/tools
+  # model per question from the curated switcher assortment.
+  # Cloud models in the switcher (Grok 4 / Grok 4 Fast) need XAI_API_KEY in .env
+  # and will hot-swap endpoint → https://api.x.ai/v1 when selected.
   provider: openai_compatible
   endpoint: http://localhost:11434/v1
   model: gemma4:31b-cloud
   api_key_env: OLLAMA_API_KEY
+  # Restored when leaving a cloud model via the switcher.
+  local_endpoint: http://localhost:11434/v1
+  local_api_key_env: OLLAMA_API_KEY
   temperature: 0.3
-  max_tokens: 16384
-  request_timeout_seconds: 180
+  max_tokens: 4096
+  request_timeout_seconds: 300
   native_tool_calls: true
   reasoning_effort: none
 
@@ -194,17 +201,18 @@ voice:
   #                Set piper_enabled: true + install piper-tts to activate.
   #   2. nvidia  — NVIDIA Riva cloud (needs NVIDIA_API_KEY).
   #   3. edge    — Microsoft en-GB-RyanNeural (cinematic British male).
-  provider: auto
-  edge_voice: en-GB-ThomasNeural    # deeper, more cinematic British male — naturally Bettany-like
-  edge_rate: "-6%"                  # slight slow-down for gravitas, not so heavy it muddies
-  edge_pitch: "+0Hz"                # native pitch — edge-tts neural models lose fidelity when pitch-shifted
+  # Always use the local JARVIS Piper voice (no Edge / Riva fallback).
+  provider: piper
+  edge_voice: en-GB-ThomasNeural    # unused when provider=piper (kept for reference)
+  edge_rate: "-6%"
+  edge_pitch: "+0Hz"
 
   # Piper TTS (local, closest to MCU JARVIS voice).
   # Install:  pip install piper-tts
   # Model :   huggingface.co/jgkawell/jarvis  →  download en_GB-jarvis-medium.onnx
   #           place at:  data/voices/jarvis.onnx  (+ matching .onnx.json)
   piper_enabled: true
-  piper_model:  data/voices/jarvis.onnx        # HIGH quality (114 MB) — closest to MCU JARVIS
+  piper_model:  data/voices/jarvis.onnx        # medium quality (~63 MB) — closest to MCU JARVIS
   piper_speaker: 0
   piper_length_scale: 1.0                     # RESTORED to normal speed (1.0 = standard)
   piper_noise_scale: 0.55                      # lower = smoother, more even tone
@@ -260,9 +268,23 @@ plugins:
   agent_backend_tools:   { enabled: true }
   voice_tools_optional:  { enabled: true }
   vision_tools_optional: { enabled: true }
+  barehands_tools:       { enabled: true }
   calendar_optional:     { enabled: false }
   email_optional:        { enabled: false }
   smart_home_optional:   { enabled: false }
+
+# Hand-tracked glass stage — https://github.com/jaredrhod/barehands (AGPL-3.0)
+# Say "barehands" / "hands mode" or click the top-right Hands button.
+barehands:
+  enabled: true
+  port: 8794
+  path: integrations/barehands
+  keywords:
+    - barehands
+    - bare hands
+    - hands mode
+    - hand mode
+    - hand tracking
 
 agents:
   planner:  { enabled: true }

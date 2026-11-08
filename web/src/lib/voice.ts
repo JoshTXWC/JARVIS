@@ -80,44 +80,34 @@ function voiceTier(voice: SpeechSynthesisVoice | null): VoiceProfile["tier"] {
   return "fallback";
 }
 
-function publishVoiceProfile(voice: SpeechSynthesisVoice | null) {
-  useStore.getState().setVoiceProfile(
-    voice
-      ? { name: voice.name, lang: voice.lang, tier: voiceTier(voice) }
-      : { name: "No browser TTS voice", lang: "offline", tier: "offline" }
-  );
+const JARVIS_PROFILE: VoiceProfile = {
+  name: "JARVIS",
+  lang: "en-GB",
+  tier: "cinematic",
+};
+
+function publishJarvisProfile() {
+  useStore.getState().setVoiceProfile(JARVIS_PROFILE);
 }
 
 function pickVoice(): SpeechSynthesisVoice | null {
-  if (!SYNTH) {
-    publishVoiceProfile(null);
-    return null;
-  }
-  if (cachedVoice) return cachedVoice;
-  const voices = SYNTH.getVoices();
-  const ranked = [...voices].sort((a, b) => voiceScore(b) - voiceScore(a));
-  const prefer = ranked.find((v) => voiceScore(v) > 0)
-              || voices.find((v) => v.lang === "en-GB")
-              || voices.find((v) => v.lang.startsWith("en"))
-              || voices[0]
-              || null;
-  cachedVoice = prefer ?? null;
-  publishVoiceProfile(cachedVoice);
-  return cachedVoice;
+  // Browser SpeechSynthesis is disabled — voice is server-side JARVIS (Piper) only.
+  cachedVoice = null;
+  publishJarvisProfile();
+  return null;
 }
 
 if (typeof window !== "undefined" && SYNTH) {
-  SYNTH.onvoiceschanged = () => { cachedVoice = null; pickVoice(); };
+  SYNTH.onvoiceschanged = () => { cachedVoice = null; };
 }
 
 export function refreshVoiceProfile(): void {
+  publishJarvisProfile();
   void refreshServerVoiceProfile();
-  pickVoice();
 }
 
 export function currentVoiceProfile(): VoiceProfile | null {
-  const voice = pickVoice();
-  return voice ? { name: voice.name, lang: voice.lang, tier: voiceTier(voice) } : null;
+  return JARVIS_PROFILE;
 }
 
 async function refreshServerVoiceProfile(): Promise<void> {
@@ -125,15 +115,18 @@ async function refreshServerVoiceProfile(): Promise<void> {
     const resp = await fetch("/api/tts/status");
     if (!resp.ok) return;
     const status = await resp.json();
+    // Always surface as JARVIS regardless of backend provider label.
     if (status?.available) {
       useStore.getState().setVoiceProfile({
-        name: status.label || "Microsoft Ryan Neural",
+        name: "JARVIS",
         lang: status.lang || "en-GB",
         tier: "cinematic",
       });
+    } else {
+      publishJarvisProfile();
     }
   } catch {
-    // browser voices remain the fallback
+    publishJarvisProfile();
   }
 }
 
@@ -179,11 +172,7 @@ async function speakWithServerTts(clean: string): Promise<boolean> {
     activeAudio = new Audio(activeAudioUrl);
     activeAudio.onplay = () => {
       console.log("[TTS] playing audio");
-      useStore.getState().setVoiceProfile({
-        name: "Microsoft Ryan Neural",
-        lang: "en-GB",
-        tier: "cinematic",
-      });
+      publishJarvisProfile();
       useStore.getState().setOrb("speaking");
       mic.onTtsStart();
     };
@@ -220,9 +209,10 @@ export function speak(text: string): void {
   // an in-progress streamSpeak burst.
   cancelStreamingTts();
   void (async () => {
-    if (await speakWithServerTts(clean)) return;
-    console.log("[TTS] server TTS failed, trying browser TTS");
-    speakWithBrowserTts(clean);
+    // JARVIS voice only — no browser SpeechSynthesis fallback.
+    if (!(await speakWithServerTts(clean))) {
+      console.warn("[TTS] JARVIS voice unavailable (server TTS failed)");
+    }
   })();
 }
 

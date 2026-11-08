@@ -1,5 +1,5 @@
 @echo off
-setlocal
+setlocal EnableDelayedExpansion
 
 echo.
 echo  ====================================================
@@ -7,16 +7,50 @@ echo   J.A.R.V.I.S. setup
 echo  ====================================================
 echo.
 
+:: Resolve a usable Python 3.10+ interpreter.
+:: Prefer `python` on PATH; fall back to the Windows `py` launcher.
+set "PY="
 where python >nul 2>&1
+if not errorlevel 1 (
+  for /f "delims=" %%i in ('where python') do (
+    set "PY=%%i"
+    goto :have_py
+  )
+)
+
+where py >nul 2>&1
+if not errorlevel 1 (
+  for /f "delims=" %%i in ('py -3 -c "import sys; print(sys.executable)" 2^>nul') do (
+    set "PY=%%i"
+    goto :have_py
+  )
+)
+
+echo [ERROR] Python 3.10+ was not found.
+echo         Install from https://www.python.org/downloads/
+echo         and tick "Add python.exe to PATH", then re-run setup.bat.
+echo         Or install the Python Launcher ^(py.exe^) and try again.
+pause
+exit /b 1
+
+:have_py
+echo [py]  using: !PY!
+"!PY!" -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" >nul 2>&1
 if errorlevel 1 (
-  echo [ERROR] Python is not on PATH. Install Python 3.10+ first.
+  echo [ERROR] Need Python 3.10 or newer. Found:
+  "!PY!" --version
   pause
   exit /b 1
 )
 
 if not exist venv (
   echo [py]  creating virtual environment...
-  python -m venv venv
+  "!PY!" -m venv venv
+  if errorlevel 1 (
+    echo [ERROR] Failed to create venv.
+    pause
+    exit /b 1
+  )
 )
 
 call venv\Scripts\activate.bat

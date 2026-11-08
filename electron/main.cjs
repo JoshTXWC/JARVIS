@@ -3,11 +3,8 @@
  *
  * Background-resident: closing the window hides to the tray instead of
  * quitting. The renderer keeps running, so the mic and wake-word loop
- * survive across show/hide cycles. Two visual modes:
- *
- *   - "full"   : 1600x1000 frameless workstation HUD
- *   - "widget" : 460x780 frameless side panel pinned to the right edge,
- *                always-on-top, intended for at-a-glance results.
+ * survive across show/hide cycles. Single visual mode: 1600x1000 frameless
+ * workstation HUD.
  *
  * Global hotkey CommandOrControl+Shift+Space toggles visibility. Wake-word
  * detection in the renderer ALSO opens the window (via IPC) so the user
@@ -25,17 +22,12 @@ const PROJECT_ROOT = path.resolve(__dirname, "..");
 const TRAY_ICON_PATH = path.resolve(PROJECT_ROOT, "web", "public", "favicon.png");
 const TRAY_ICON_FALLBACK_SVG = path.resolve(PROJECT_ROOT, "web", "public", "favicon.svg");
 
-const MODE = { FULL: "full", WIDGET: "widget" };
-const WIDGET_W = 460;
-const WIDGET_H = 780;
-const WIDGET_MARGIN = 18;
 const FULL_W = 1600;
 const FULL_H = 1000;
 
 let mainWindow = null;
 let backend = null;
 let tray = null;
-let currentMode = MODE.FULL;
 let isQuiting = false;
 
 // ── backend lifecycle ─────────────────────────────────────────────────────
@@ -108,59 +100,8 @@ function pickTrayIcon() {
   return nativeImage.createEmpty();
 }
 
-function applyMode(mode, { reposition = true } = {}) {
+function showWindow() {
   if (!mainWindow) return;
-  // Persist the CURRENT mode's bounds before switching, so each mode
-  // remembers its own size/position independently.
-  persistCurrentBounds();
-
-  currentMode = mode === MODE.WIDGET ? MODE.WIDGET : MODE.FULL;
-  const store = loadStoredBounds();
-  const savedForMode = store[currentMode];
-
-  if (currentMode === MODE.WIDGET) {
-    mainWindow.setAlwaysOnTop(true, "floating");
-    mainWindow.setSkipTaskbar(true);
-    mainWindow.setMinimumSize(360, 480);
-    mainWindow.setResizable(true);
-    if (savedForMode && savedForMode.width && savedForMode.height) {
-      mainWindow.setBounds(savedForMode);
-    } else {
-      mainWindow.setSize(WIDGET_W, WIDGET_H);
-      if (reposition) {
-        const display = screen.getPrimaryDisplay();
-        const { workArea } = display;
-        const x = workArea.x + workArea.width - WIDGET_W - WIDGET_MARGIN;
-        const y = workArea.y + WIDGET_MARGIN;
-        mainWindow.setPosition(x, y);
-      }
-    }
-  } else {
-    mainWindow.setAlwaysOnTop(false);
-    mainWindow.setSkipTaskbar(false);
-    mainWindow.setMinimumSize(1024, 700);
-    mainWindow.setResizable(true);
-    if (savedForMode && savedForMode.width && savedForMode.height) {
-      mainWindow.setBounds(savedForMode);
-    } else {
-      mainWindow.setSize(FULL_W, FULL_H);
-      if (reposition) mainWindow.center();
-    }
-  }
-  broadcastMode();
-  rebuildTrayMenu();
-}
-
-function broadcastMode() {
-  if (!mainWindow) return;
-  try {
-    mainWindow.webContents.send("jarvis:mode-changed", currentMode);
-  } catch { /* ignore */ }
-}
-
-function showWindow({ mode } = {}) {
-  if (!mainWindow) return;
-  if (mode) applyMode(mode);
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
   mainWindow.focus();
@@ -184,25 +125,11 @@ function toggleVisibility() {
 
 function rebuildTrayMenu() {
   if (!tray) return;
-  const isWidget = currentMode === MODE.WIDGET;
   const isVisible = mainWindow ? mainWindow.isVisible() : false;
   const menu = Menu.buildFromTemplate([
     {
       label: isVisible ? "Hide JARVIS" : "Show JARVIS",
       click: () => (isVisible ? hideWindow() : showWindow()),
-    },
-    { type: "separator" },
-    {
-      label: "Full HUD",
-      type: "radio",
-      checked: !isWidget,
-      click: () => { applyMode(MODE.FULL); showWindow(); },
-    },
-    {
-      label: "Widget (side panel)",
-      type: "radio",
-      checked: isWidget,
-      click: () => { applyMode(MODE.WIDGET); showWindow(); },
     },
     { type: "separator" },
     {
@@ -292,13 +219,16 @@ function persistCurrentBounds() {
   if (mainWindow.isMinimized() || mainWindow.isFullScreen()) return;
   try {
     const b = mainWindow.getBounds();
-    saveStoredBounds({ [currentMode]: b });
+    saveStoredBounds({ full: b });
   } catch { /* noop */ }
 }
 
 function pickInitialBounds() {
   const store = loadStoredBounds();
-  const saved = store[MODE.FULL];
+  // Prefer the flat "full" key; also accept a legacy top-level bounds object
+  // that has width/height directly (older single-mode saves).
+  const saved = store.full && store.full.width ? store.full
+    : (store.width ? store : null);
   if (!saved) return { width: FULL_W, height: FULL_H };
   // Validate the saved bounds intersect a current display so we don't
   // restore the window off-screen after a monitor change.
@@ -340,7 +270,6 @@ function createWindow() {
 
   mainWindow.once("ready-to-show", () => {
     mainWindow.show();
-    broadcastMode();
   });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -363,8 +292,8 @@ function createWindow() {
   mainWindow.on("hide", rebuildTrayMenu);
   mainWindow.on("closed", () => { mainWindow = null; });
 
-  // Persist bounds (per mode) — debounced via setTimeout to coalesce the
-  // rapid stream of `resize` / `move` events Windows fires during a drag.
+  // Persist bounds — debounced via setTimeout to coalesce the rapid stream
+  // of `resize` / `move` events Windows fires during a drag.
   let saveTimer = null;
   const scheduleSave = () => {
     if (saveTimer) clearTimeout(saveTimer);
@@ -398,24 +327,12 @@ async function loadApp() {
 
 function installIpc() {
   ipcMain.on("jarvis:wake", () => {
-    // Renderer detected the wake word — promote to widget mode if hidden,
-    // otherwise just bring forward.
-    if (!mainWindow) return;
-    if (!mainWindow.isVisible()) {
-      applyMode(MODE.WIDGET);
-      showWindow();
-    } else {
-      showWindow();
-    }
-  });
-  ipcMain.on("jarvis:show", (_e, payload) => showWindow(payload || {}));
-  ipcMain.on("jarvis:hide", () => hideWindow());
-  ipcMain.on("jarvis:toggle-visibility", () => toggleVisibility());
-  ipcMain.on("jarvis:set-widget-mode", (_e, on) => {
-    applyMode(on ? MODE.WIDGET : MODE.FULL);
+    // Renderer detected the wake word — bring the HUD forward.
     showWindow();
   });
-  ipcMain.handle("jarvis:request-mode", () => currentMode);
+  ipcMain.on("jarvis:show", () => showWindow());
+  ipcMain.on("jarvis:hide", () => hideWindow());
+  ipcMain.on("jarvis:toggle-visibility", () => toggleVisibility());
 }
 
 // ── global shortcuts ─────────────────────────────────────────────────────
@@ -424,11 +341,6 @@ function installShortcuts() {
   const accel = "CommandOrControl+Shift+Space";
   const ok = globalShortcut.register(accel, toggleVisibility);
   if (!ok) console.warn("[electron] failed to register", accel);
-  // Secondary: dedicated widget toggle.
-  globalShortcut.register("CommandOrControl+Shift+J", () => {
-    applyMode(currentMode === MODE.WIDGET ? MODE.FULL : MODE.WIDGET);
-    showWindow();
-  });
 }
 
 // ── lifecycle ─────────────────────────────────────────────────────────────

@@ -23,6 +23,10 @@ class ModelConfig(BaseModel):
     endpoint: str = "http://localhost:1234/v1"
     model: str = "local-model"
     api_key_env: str = "LLM_API_KEY"
+    # Remembered local Ollama route — restored when leaving a cloud model
+    # (e.g. xAI Grok) via the model switcher.
+    local_endpoint: str = "http://localhost:11434/v1"
+    local_api_key_env: str = "OLLAMA_API_KEY"
     temperature: float = 0.3
     max_tokens: int = 4096
     request_timeout_seconds: int = 120
@@ -104,6 +108,23 @@ class AssistantConfig(BaseModel):
 class MissionConfig(BaseModel):
     enabled: bool = False
     project_path: str = ""
+
+
+class BarehandsConfig(BaseModel):
+    """Hand-tracked glass stage — https://github.com/jaredrhod/barehands (AGPL-3.0)."""
+    enabled: bool = True
+    port: int = 8794
+    path: str = "integrations/barehands"
+    # Spoken / typed phrases that open the stage (also matched by intent router).
+    keywords: list[str] = Field(
+        default_factory=lambda: [
+            "barehands",
+            "bare hands",
+            "hands mode",
+            "hand mode",
+            "hand tracking",
+        ]
+    )
 
 
 class UltimateConfig(BaseModel):
@@ -188,6 +209,7 @@ class Config(BaseModel):
     agents: dict[str, PluginToggle] = Field(default_factory=dict)
     mission: MissionConfig = Field(default_factory=MissionConfig)
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
+    barehands: BarehandsConfig = Field(default_factory=BarehandsConfig)
     ultimate: UltimateConfig = Field(default_factory=UltimateConfig)
 
     project_root: Path = PROJECT_ROOT

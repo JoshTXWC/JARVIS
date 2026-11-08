@@ -167,7 +167,7 @@ export default function MediaHub({ kinds, title, accent = "#7dd3fc" }: Props) {
                 }}
                 title="Clear hub"
                 danger
-              >×</IconBtn>
+              >CLR</IconBtn>
             </div>
           </div>
         </div>
@@ -297,7 +297,7 @@ function Card({
             {card.pinned ? "★" : "☆"}
           </IconBtn>
           {!large && <IconBtn onClick={onMaximize} title="Maximise">⛶</IconBtn>}
-          <IconBtn onClick={onClose} title="Dismiss" danger>×</IconBtn>
+          <IconBtn onClick={onClose} title="Dismiss" danger>CLR</IconBtn>
         </div>
       </div>
 

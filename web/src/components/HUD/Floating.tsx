@@ -1,14 +1,7 @@
 /**
- * FLOATING — generic draggable + resizable panel wrapper.
- *
- * Persistence rules (the source of every "my layout vanished" bug):
- *   • localStorage is written ONLY on user-intent (drag end, resize end,
- *     page unload). Window resize does NOT mutate persisted state — it
- *     just re-derives the displayed position visually.
- *   • Saved record includes the viewport dimensions AT THE TIME OF SAVE
- *     so we can detect the user's intended anchor (left / right / center /
- *     bottom) and re-place the panel correctly when the window grows or
- *     shrinks later.
+ * FLOATING — draggable + resizable panel wrapper.
+ * Drag the top strip. Release in the top icon-dock zone to animate the
+ * tile back into the centered menu (dockable panels only).
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -17,6 +10,9 @@ import {
   release as releaseSlot,
   update as updateSlot,
 } from "../../lib/layoutBroker";
+import { clampBox, contentBounds, inDockZone } from "../../lib/contentBounds";
+import { isDockable } from "../../lib/dockCatalog";
+import { useStore } from "../../lib/store";
 
 export interface Box { x: number; y: number; w: number; h: number }
 interface SavedBox extends Box { vw?: number; vh?: number }
@@ -27,12 +23,12 @@ interface Props {
   minW?: number;
   minH?: number;
   children: React.ReactNode;
-  /** disable drag/resize (read-only layout slot) */
   locked?: boolean;
-  /** z-index when focused */
   z?: number;
-  /** track content height — disables vertical resize, height auto-grows */
   autoHeight?: boolean;
+  /** @deprecated — tiles no longer show X; docking replaces removal */
+  removable?: boolean;
+  overflowVisible?: boolean;
 }
 
 const STORAGE_PREFIX = "jarvis.floating.v2.";
@@ -56,10 +52,6 @@ function loadStoredBox(id: string): SavedBox | null {
 }
 
 function loadBox(id: string, fallback: Box): SavedBox {
-  // Existing user-intent layout wins ONLY if it doesn't collide with any
-  // already-registered panel. If a stored layout would overlap something
-  // already live the broker overrides it with the first free slot — the
-  // user's "everything in its own window" rule trumps the saved layout.
   const stored = loadStoredBox(id);
   const vw = typeof window !== "undefined" ? window.innerWidth : 1600;
   const vh = typeof window !== "undefined" ? window.innerHeight : 900;
@@ -67,15 +59,13 @@ function loadBox(id: string, fallback: Box): SavedBox {
     const display = computeDisplay(stored, vw, vh);
     if (!collidesAnything(id, display)) {
       updateSlot(id, display);
-      return stored;
+      return { ...stored, ...display, vw, vh };
     }
-    // Stored position would overlap a live neighbour — fall through to the
-    // broker so we find a clear slot. Use stored size as the request hint
-    // so the user's preferred dimensions survive.
   }
   const slot = findSlot(id, stored ?? fallback, vw, vh);
-  updateSlot(id, slot);
-  return { ...slot, vw, vh };
+  const clamped = clampBox(slot, vw, vh);
+  updateSlot(id, clamped);
+  return { ...clamped, vw, vh };
 }
 
 function saveBox(id: string, box: Box) {
@@ -92,31 +82,31 @@ export function resetAllLayouts() {
     Object.keys(localStorage)
       .filter((k) => k.startsWith(STORAGE_PREFIX) || k.startsWith("jarvis.floating.v1."))
       .forEach((k) => localStorage.removeItem(k));
-    // Wipe broker so the reload-rendered panels re-pack from scratch.
+    try {
+      const raw = localStorage.getItem("jarvis.store.v1");
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed?.state) {
+          parsed.state.dockedPanels = parsed.state.dockedPanels || [];
+          localStorage.setItem("jarvis.store.v1", JSON.stringify(parsed));
+        }
+      }
+    } catch { /* ignore */ }
     window.location.reload();
   } catch { /* ignore */ }
 }
 
-/**
- * Given the saved box and the CURRENT viewport, return the display position.
- * The saved viewport (vw,vh) lets us decide which edge the user originally
- * anchored to and follow it visually as the window resizes.
- */
 function computeDisplay(saved: SavedBox, vw: number, vh: number): Box {
-  const w = Math.min(saved.w, Math.max(80, vw - 16));
-  const h = Math.min(saved.h, Math.max(60, vh - 16));
+  const bounds = contentBounds(vw, vh);
+  const maxW = Math.max(80, bounds.right - bounds.left);
+  const maxH = Math.max(60, bounds.bottom - bounds.top);
+  const w = Math.min(saved.w, maxW);
+  const h = Math.min(saved.h, maxH);
 
-  // Without a saved viewport we just clamp the raw coordinates.
   if (!saved.vw || !saved.vh) {
-    return {
-      x: Math.max(0, Math.min(vw - 80, saved.x)),
-      y: Math.max(0, Math.min(vh - 60, saved.y)),
-      w,
-      h,
-    };
+    return clampBox({ x: saved.x, y: saved.y, w, h }, vw, vh);
   }
 
-  // Horizontal placement.
   const rightGap = saved.vw - (saved.x + saved.w);
   const centerOff = (saved.x + saved.w / 2) - saved.vw / 2;
   let x = saved.x;
@@ -126,19 +116,18 @@ function computeDisplay(saved: SavedBox, vw: number, vh: number): Box {
     x = vw / 2 - w / 2 + centerOff;
   }
 
-  // Vertical placement.
   const bottomGap = saved.vh - (saved.y + saved.h);
   let y = saved.y;
   if (bottomGap >= 0 && bottomGap <= ANCHOR_PX && saved.y > ANCHOR_PX) {
     y = vh - h - bottomGap;
   }
 
-  return {
-    x: Math.max(0, Math.min(vw - 80, x)),
-    y: Math.max(0, Math.min(vh - 60, y)),
-    w,
-    h,
-  };
+  return clampBox({ x, y, w, h }, vw, vh);
+}
+
+function dockTargetRect(): DOMRect | null {
+  const el = document.getElementById("jarvis-icon-dock");
+  return el ? el.getBoundingClientRect() : null;
 }
 
 export default function Floating({
@@ -150,24 +139,27 @@ export default function Floating({
   locked = false,
   z = 20,
   autoHeight = false,
+  overflowVisible = false,
 }: Props) {
-  // `saved` is the user-intent box (only mutated by drag/resize end).
   const [saved, setSaved] = useState<SavedBox>(() => loadBox(id, defaultBox));
-  // `vp` tracks the live viewport so render can re-derive position.
   const [vp, setVp] = useState(() => ({
     w: typeof window !== "undefined" ? window.innerWidth : 1600,
     h: typeof window !== "undefined" ? window.innerHeight : 900,
   }));
-  // `transient` overrides `saved` during an active drag / resize so the
-  // panel follows the pointer without writing localStorage until release.
   const [transient, setTransient] = useState<Box | null>(null);
-
   const [focused, setFocused] = useState(false);
+  const [dragging, setDragging] = useState(false);
+  const [docking, setDocking] = useState(false);
   const dragRef = useRef<{ startX: number; startY: number; orig: Box } | null>(null);
   const resizeRef = useRef<{ startX: number; startY: number; orig: Box } | null>(null);
   const contentRef = useRef<HTMLDivElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
 
-  // Window resize — update viewport state ONLY. Do not touch saved.
+  const layoutEdit = useStore((s) => s.layoutEdit);
+  const dockPanel = useStore((s) => s.dockPanel);
+  const setDockHot = useStore((s) => s.setDockHot);
+  const canDock = isDockable(id);
+
   useEffect(() => {
     let raf = 0;
     const tick = () => {
@@ -185,7 +177,6 @@ export default function Floating({
     };
   }, []);
 
-  // Flush on page hide/close — last line of defense against lost layout.
   useEffect(() => {
     const flush = () => saveBox(id, transient ?? saved);
     window.addEventListener("beforeunload", flush);
@@ -196,8 +187,6 @@ export default function Floating({
     };
   }, [id, saved, transient]);
 
-  // Auto-track content height when autoHeight=true. Only writes saved height
-  // when content height stabilises — never on transient drag.
   useEffect(() => {
     if (!autoHeight || !contentRef.current) return;
     const el = contentRef.current;
@@ -205,88 +194,133 @@ export default function Floating({
       for (const ent of entries) {
         const h = Math.ceil(ent.contentRect.height);
         if (h > 0) {
-          setSaved((b) => (Math.abs(b.h - h) < 2 ? b : { ...b, h }));
+          setSaved((b) => {
+            if (Math.abs(b.h - h) < 2) return b;
+            return { ...clampBox({ ...b, h }, vp.w, vp.h), vw: vp.w, vh: vp.h };
+          });
         }
       }
     });
     ro.observe(el);
     return () => ro.disconnect();
-  }, [autoHeight]);
+  }, [autoHeight, vp.w, vp.h]);
 
-  // Persist saved layout whenever it changes — but only for USER-intent
-  // changes (drag/resize end + autoHeight settle). Window-resize never
-  // touches `saved` so this effect doesn't fire on window resize.
   useEffect(() => {
     saveBox(id, saved);
   }, [id, saved]);
 
-  // ── Render geometry. Either pointer-driven (transient) or derived from
-  // saved + current viewport.
   const display = useMemo(() => {
     if (transient) return transient;
     return computeDisplay(saved, vp.w, vp.h);
   }, [saved, vp, transient]);
 
-  // Publish current display rect to the broker so newly-spawned panels can
-  // find a non-overlapping slot relative to where everything actually sits.
   useEffect(() => {
     updateSlot(id, display);
   }, [id, display.x, display.y, display.w, display.h]);
 
   useEffect(() => () => releaseSlot(id), [id]);
 
-  // ── Drag ──────────────────────────────────────────────────────────────
+  const finishDock = useCallback(() => {
+    dockPanel(id);
+    setDockHot(false);
+  }, [dockPanel, id, setDockHot]);
+
+  const startDockAnimation = useCallback(() => {
+    if (!canDock || docking) return;
+    setDocking(true);
+    setDockHot(true);
+    const dock = dockTargetRect();
+    const node = rootRef.current;
+    if (node && dock) {
+      const cx = display.x + display.w / 2;
+      const cy = display.y + display.h / 2;
+      const tx = dock.left + dock.width / 2 - cx;
+      const ty = dock.top + dock.height / 2 - cy;
+      node.style.transition = "transform 280ms cubic-bezier(0.16,1,0.3,1), opacity 240ms ease";
+      node.style.transformOrigin = "center center";
+      node.style.transform = `translate(${tx}px, ${ty}px) scale(0.18)`;
+      node.style.opacity = "0";
+      window.setTimeout(finishDock, 290);
+    } else {
+      finishDock();
+    }
+  }, [canDock, docking, display, finishDock, setDockHot]);
+
   const onDragStart = useCallback((e: React.PointerEvent) => {
-    if (locked) return;
+    if (locked || docking) return;
+    const t = e.target as HTMLElement | null;
+    if (t?.closest("button, a, input, textarea, select, [data-no-drag]")) return;
+    e.stopPropagation();
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     dragRef.current = { startX: e.clientX, startY: e.clientY, orig: { ...display } };
     setTransient({ ...display });
     setFocused(true);
-  }, [locked, display]);
+    setDragging(true);
+  }, [locked, docking, display]);
 
   const onDragMove = useCallback((e: React.PointerEvent) => {
     if (!dragRef.current) return;
     const dx = e.clientX - dragRef.current.startX;
     const dy = e.clientY - dragRef.current.startY;
-    setTransient({
+    // Allow free drag into the dock zone (don't clamp Y while dragging up).
+    const next = {
       ...dragRef.current.orig,
-      x: Math.max(0, Math.min(window.innerWidth  - 80, dragRef.current.orig.x + dx)),
-      y: Math.max(0, Math.min(window.innerHeight - 60, dragRef.current.orig.y + dy)),
-    });
-  }, []);
+      x: dragRef.current.orig.x + dx,
+      y: dragRef.current.orig.y + dy,
+    };
+    const hot = canDock && inDockZone(e.clientY);
+    setDockHot(hot);
+    if (hot) {
+      setTransient(next);
+    } else {
+      setTransient(clampBox(next));
+    }
+  }, [canDock, setDockHot]);
 
   const onDragEnd = useCallback((e: React.PointerEvent) => {
     if (!dragRef.current) return;
     (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
     dragRef.current = null;
+    setDragging(false);
+
+    if (canDock && inDockZone(e.clientY)) {
+      startDockAnimation();
+      return;
+    }
+
+    setDockHot(false);
     setTransient((t) => {
       if (t) {
-        setSaved({ ...t, vw: window.innerWidth, vh: window.innerHeight });
+        const next = clampBox(t);
+        setSaved({ ...next, vw: window.innerWidth, vh: window.innerHeight });
       }
       return null;
     });
-  }, []);
+  }, [canDock, setDockHot, startDockAnimation]);
 
-  // ── Resize ────────────────────────────────────────────────────────────
   const onResizeStart = useCallback((e: React.PointerEvent) => {
-    if (locked) return;
+    if (locked || docking) return;
     e.stopPropagation();
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     resizeRef.current = { startX: e.clientX, startY: e.clientY, orig: { ...display } };
     setTransient({ ...display });
     setFocused(true);
-  }, [locked, display]);
+  }, [locked, docking, display]);
 
   const onResizeMove = useCallback((e: React.PointerEvent) => {
     if (!resizeRef.current) return;
     const dx = e.clientX - resizeRef.current.startX;
     const dy = e.clientY - resizeRef.current.startY;
-    setTransient({
+    const bounds = contentBounds();
+    const next = {
       x: resizeRef.current.orig.x,
       y: resizeRef.current.orig.y,
       w: Math.max(minW, resizeRef.current.orig.w + dx),
       h: Math.max(minH, resizeRef.current.orig.h + dy),
-    });
+    };
+    next.w = Math.min(next.w, bounds.right - next.x);
+    next.h = Math.min(next.h, bounds.bottom - next.y);
+    setTransient(clampBox(next));
   }, [minW, minH]);
 
   const onResizeEnd = useCallback((e: React.PointerEvent) => {
@@ -295,7 +329,8 @@ export default function Floating({
     resizeRef.current = null;
     setTransient((t) => {
       if (t) {
-        setSaved({ ...t, vw: window.innerWidth, vh: window.innerHeight });
+        const next = clampBox(t);
+        setSaved({ ...next, vw: window.innerWidth, vh: window.innerHeight });
       }
       return null;
     });
@@ -303,40 +338,31 @@ export default function Floating({
 
   return (
     <div
+      ref={rootRef}
       data-floating-id={id}
       onPointerDown={() => setFocused(true)}
       onMouseEnter={() => setFocused(true)}
-      onMouseLeave={() => setFocused(false)}
-      className="animate-boot_in fixed pointer-events-auto"
+      onMouseLeave={() => { if (!dragging) setFocused(false); }}
+      className={`animate-boot_in fixed pointer-events-auto ${dragging ? "select-none" : ""} ${layoutEdit ? "ring-1 ring-jarvis-cyan/20" : ""}`}
       style={{
         left: display.x,
         top: display.y,
         width: display.w,
         height: autoHeight ? undefined : display.h,
-        zIndex: focused ? z + 5 : z,
+        zIndex: focused || dragging || docking ? z + 5 : z,
+        willChange: docking ? "transform, opacity" : undefined,
       }}
     >
-      {!locked && (
+      {!locked && !docking && (
         <div
           onPointerDown={onDragStart}
           onPointerMove={onDragMove}
           onPointerUp={onDragEnd}
           onPointerCancel={onDragEnd}
-          title="drag"
-          className="absolute top-0 left-0 right-0 h-6 z-30 cursor-grab active:cursor-grabbing"
+          title={canDock ? "Drag · drop on top menu to dock" : "Drag"}
+          className="absolute top-0 left-0 right-0 h-9 z-30 cursor-grab active:cursor-grabbing"
           style={{ touchAction: "none" }}
-        >
-          <div
-            className="absolute left-1/2 -translate-x-1/2 top-1.5 flex gap-0.5 transition-opacity"
-            style={{ opacity: focused ? 0.65 : 0 }}
-          >
-            <span className="w-1 h-1 rounded-full bg-jarvis-ice/70" />
-            <span className="w-1 h-1 rounded-full bg-jarvis-ice/70" />
-            <span className="w-1 h-1 rounded-full bg-jarvis-ice/70" />
-            <span className="w-1 h-1 rounded-full bg-jarvis-ice/70" />
-            <span className="w-1 h-1 rounded-full bg-jarvis-ice/70" />
-          </div>
-        </div>
+        />
       )}
 
       <div
@@ -346,28 +372,29 @@ export default function Floating({
           height: autoHeight ? "auto" : "100%",
           display: "flex",
           flexDirection: "column",
-          overflow: "hidden",
+          overflow: overflowVisible ? "visible" : "hidden",
         }}
       >
         {children}
       </div>
 
-      {!locked && !autoHeight && (
+      {!locked && !autoHeight && !docking && (
         <div
           onPointerDown={onResizeStart}
           onPointerMove={onResizeMove}
           onPointerUp={onResizeEnd}
           onPointerCancel={onResizeEnd}
-          title="resize"
-          className="absolute bottom-0 right-0 w-4 h-4 z-30 cursor-nwse-resize group"
+          title="Resize"
+          data-no-drag
+          className="absolute bottom-0 right-0 w-5 h-5 z-30 cursor-nwse-resize"
           style={{ touchAction: "none" }}
         >
           <div
-            className="absolute bottom-1 right-1 transition-opacity"
-            style={{ opacity: focused ? 0.7 : 0.25 }}
+            className="absolute bottom-1.5 right-1.5 text-jarvis-ice/40 transition-opacity"
+            style={{ opacity: focused || dragging || layoutEdit ? 0.7 : 0.2 }}
           >
             <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
-              <path d="M9 1 L1 9 M9 5 L5 9 M9 9 L9 9" stroke="rgba(186,230,253,0.85)" strokeWidth="1.2" strokeLinecap="round" />
+              <path d="M9 1 L1 9 M9 5 L5 9 M9 9 L9 9" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
             </svg>
           </div>
         </div>
