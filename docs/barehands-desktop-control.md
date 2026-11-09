@@ -68,9 +68,20 @@ GestureOverlay (single MediaPipe + camera)
 - Settings panel + store flags (injection never auto-starts from persistence)
 - Shared MediaPipe path via `GestureOverlay` (no second webcam)
 
+## Tracking optimization (current)
+
+- Separated coordinate spaces: camera → preview vs camera → control → desktop (`web/src/lib/hands/coords.ts`)
+- One Euro adaptive filtering for cursor + lighter viz filters (`oneEuro.ts`)
+- Shared MediaPipe pipeline with GPU→CPU fallback, rVFC scheduling, frame drop-on-busy
+- Dominant-hand identity continuity (`handIdentity.ts`)
+- Hand-size–normalized pinch lock / click / drag (`precisionControl.ts`)
+- Calibration wizard + Tracking & Precision panel (presets Fast / Balanced / Precision)
+- Overlay skeleton uses object-cover camera mapping; cursor uses calibrated desktop UV
+- Validation: `docs/barehands-tracking-validation.md`
+
 ## Still iterative / polish
 
-- Full interactive calibration wizard UI (quick calibrate ships)
+- Optional MediaPipe Web Worker offload (main-thread rVFC + drop-stale ships today)
 - Per-gesture remapping editor in Settings
 - Voice phrases to enable Precision/Spatial (can use Settings + shortcuts today)
 - UI Automation deep control targeting beyond Win32 window APIs

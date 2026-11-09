@@ -16,8 +16,15 @@ export type HandsFrame = {
   hands: Array<Array<[number, number, number]>>;
   lost?: boolean;
   poses?: string[];
-  /** Control-mode fingertip cursor for the system overlay. */
+  /** Control-mode fingertip cursor for the system overlay (desktop UV). */
   cursor?: HandsCursorViz | null;
+  /** Camera frame size — overlay uses this for object-cover skeleton mapping. */
+  videoW?: number;
+  videoH?: number;
+  /** Dominant hand slot index into `hands` (0 or 1). */
+  dominantIndex?: number;
+  /** Per-hand quality 0–1 (edge confidence). */
+  qualities?: number[];
 };
 
 export type DesktopControlSettings = {

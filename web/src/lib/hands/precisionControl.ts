@@ -1,13 +1,30 @@
 /**
  * Combined desktop hand control (Mouse + Windows).
  *
- * Cursor = dominant-hand index tip (landmark 8) with adaptive smoothing.
+ * Cursor = dominant-hand index tip (landmark 8) with One Euro filtering.
  * Pinch approach dampens → early lock → short release = click;
  * hold ~400ms + deliberate move = drag from knuckle/palm anchor.
  * Fist = window drag · two fingers = scroll · quick double short-pinch = right click.
  */
 
-export type Pt = { x: number; y: number };
+import {
+  cameraToControl,
+  cameraToDesktop,
+  clamp01,
+  controlToDesktop,
+  desktopToUv,
+  edgeProximity,
+  type CalibrationRect,
+  type Pt,
+  type ScreenRect,
+  DEFAULT_CALIBRATION,
+} from "./coords";
+import { OneEuroFilter2D, type OneEuroParams, DEFAULT_CURSOR_EURO } from "./oneEuro";
+import type { TrackingQualitySettings } from "./trackingSettings";
+import { DEFAULT_TRACKING } from "./trackingSettings";
+
+export type { Pt, ScreenRect };
+
 export type InjectOp =
   | { op: "move"; x: number; y: number }
   | { op: "down"; button?: string }
@@ -20,8 +37,6 @@ export type InjectOp =
   | { op: "win_drop" }
   | { op: "cursor_hide" }
   | { op: "cursor_show" };
-
-export type ScreenRect = { x: number; y: number; width: number; height: number };
 
 export type CursorPhase =
   | "point"
@@ -43,23 +58,16 @@ export type CursorViz = {
   approach: number;
   /** 0–1 hold progress toward drag arm. */
   hold: number;
+  /** Optional lock indicator. */
+  locked?: boolean;
+  /** Edge / confidence quality 0–1. */
+  quality?: number;
 };
 
-const PINCH = 0.048;
-/** Start dampening before contact — index already drifts toward thumb. */
-const APPROACH_START = 0.13;
-/** Lock slightly before fingers touch. */
-const LOCK_DIST = 0.072;
 const SCROLL_THRESHOLD = 0.018;
 const DOUBLE_PINCH_MS = 420;
-const DRAG_ARM_MS = 400;
-/** Screen-pixel movement of knuckle/palm required to start drag. */
-const DRAG_MOVE_PX = 28;
-/** Adaptive smoothing: slow → more filter, fast → stick to tip. */
-const SMOOTH_SLOW = 0.38;
-const SMOOTH_FAST = 0.88;
-const SPEED_REF_PX = 42;
 const RELEASE_BLEND_MS = 160;
+const LOST_RESET_MS = 350;
 
 function dist(a: Pt, b: Pt) {
   return Math.hypot(a.x - b.x, a.y - b.y);
@@ -78,15 +86,22 @@ function lerp(a: number, b: number, t: number) {
   return a + (b - a) * t;
 }
 
-function clamp01(t: number) {
-  return Math.min(1, Math.max(0, t));
+/** Hand size proxy: wrist → middle MCP. */
+export function handSize(lm: Array<{ x: number; y: number }>): number {
+  return Math.max(1e-4, dist(tip(lm, 0), tip(lm, 9)));
+}
+
+/** Pinch distance normalized by hand size. */
+export function normalizedPinch(lm: Array<{ x: number; y: number }>): number {
+  return dist(tip(lm, 8), tip(lm, 4)) / handSize(lm);
 }
 
 export function classifyPose(
   lm: Array<{ x: number; y: number }>,
+  pinchActivate = 0.28,
 ): "pinch" | "fist" | "open" | "two_finger" {
   if (lm.length < 21) return "open";
-  if (dist(tip(lm, 8), tip(lm, 4)) < PINCH) return "pinch";
+  if (normalizedPinch(lm) < pinchActivate) return "pinch";
   const indexUp = !folded(lm, 8, 5);
   const midUp = !folded(lm, 12, 9);
   if (indexUp && midUp && folded(lm, 16, 13) && folded(lm, 20, 17)) return "two_finger";
@@ -96,36 +111,25 @@ export function classifyPose(
   return "open";
 }
 
-/** Mirror + map into calibrated region → screen pixels. */
+/** @deprecated Prefer cameraToDesktop — kept for callers/tests. */
 export function landmarkToScreen(
   nx: number,
   ny: number,
   screen: ScreenRect,
-  cal = { x0: 0.12, y0: 0.08, x1: 0.88, y1: 0.92 },
+  cal: CalibrationRect = DEFAULT_CALIBRATION,
 ): Pt {
-  const x = 1 - Math.min(1, Math.max(0, nx));
-  const y = Math.min(1, Math.max(0, ny));
-  const w = Math.max(1e-6, cal.x1 - cal.x0);
-  const h = Math.max(1e-6, cal.y1 - cal.y0);
-  const u = Math.min(1, Math.max(0, (x - cal.x0) / w));
-  const v = Math.min(1, Math.max(0, (y - cal.y0) / h));
-  return {
-    x: screen.x + u * (screen.width - 1),
-    y: screen.y + v * (screen.height - 1),
-  };
-}
-
-function toUv(pt: Pt, screen: ScreenRect): { u: number; v: number } {
-  return {
-    u: clamp01((pt.x - screen.x) / Math.max(1, screen.width - 1)),
-    v: clamp01((pt.y - screen.y) / Math.max(1, screen.height - 1)),
-  };
+  return cameraToDesktop(nx, ny, screen, cal);
 }
 
 /** Stable hand anchor for relative drag — index MCP blended with palm. */
-function handAnchor(lm: Array<{ x: number; y: number }>, screen: ScreenRect): Pt {
-  const knuckle = landmarkToScreen(lm[5].x, lm[5].y, screen);
-  const palm = landmarkToScreen(lm[0].x, lm[0].y, screen);
+function handAnchor(
+  lm: Array<{ x: number; y: number }>,
+  screen: ScreenRect,
+  cal: CalibrationRect,
+  opts: { sensX: number; sensY: number; edgeCompress: number },
+): Pt {
+  const knuckle = cameraToDesktop(lm[5].x, lm[5].y, screen, cal, opts);
+  const palm = cameraToDesktop(lm[0].x, lm[0].y, screen, cal, opts);
   return {
     x: knuckle.x * 0.65 + palm.x * 0.35,
     y: knuckle.y * 0.65 + palm.y * 0.35,
@@ -140,8 +144,9 @@ export class PrecisionController {
   private scrollAnchorY: number | null = null;
   private lastShortClickAt = 0;
 
-  private smoothed: Pt | null = null;
+  private filter = new OneEuroFilter2D(DEFAULT_CURSOR_EURO);
   private cursor: Pt | null = null;
+  private lastUv: Pt | null = null;
 
   private pinchMode: PinchMode = "idle";
   private lockPos: Pt | null = null;
@@ -153,6 +158,22 @@ export class PrecisionController {
   private releasing = false;
   private releaseFrom: Pt | null = null;
   private releaseStartMs = 0;
+  private lostSince: number | null = null;
+  private settings: TrackingQualitySettings = { ...DEFAULT_TRACKING };
+
+  configure(partial: Partial<TrackingQualitySettings>) {
+    this.settings = { ...this.settings, ...partial };
+    if (partial.cursorFilter) {
+      this.filter.setParams(partial.cursorFilter as OneEuroParams);
+    }
+    if (partial.calibration) {
+      this.settings.calibration = { ...partial.calibration };
+    }
+  }
+
+  getSettings(): TrackingQualitySettings {
+    return this.settings;
+  }
 
   reset() {
     const ops: InjectOp[] = [];
@@ -165,8 +186,9 @@ export class PrecisionController {
     this.wasFist = false;
     this.windowDragging = false;
     this.scrollAnchorY = null;
-    this.smoothed = null;
+    this.filter.reset();
     this.cursor = null;
+    this.lastUv = null;
     this.pinchMode = "idle";
     this.lockPos = null;
     this.pinchStartMs = 0;
@@ -174,7 +196,14 @@ export class PrecisionController {
     this.didDrag = false;
     this.releasing = false;
     this.releaseFrom = null;
+    this.lostSince = null;
     return ops;
+  }
+
+  /** Call when dominant hand identity changes to avoid cursor teleport. */
+  onHandIdentityChange() {
+    this.filter.reset(this.cursor ?? undefined);
+    this.lastUv = null;
   }
 
   private beginRelease(nowMs: number) {
@@ -194,7 +223,6 @@ export class PrecisionController {
       ops.push({ op: "up", button: "left" });
       this.mouseDown = false;
     } else if (!this.didDrag && this.lockPos) {
-      // Short pinch → click at lock. Double short-pinch → right click.
       if (nowMs - this.lastShortClickAt <= DOUBLE_PINCH_MS) {
         ops.push({ op: "click", button: "right" });
         this.lastShortClickAt = 0;
@@ -206,6 +234,22 @@ export class PrecisionController {
     this.beginRelease(nowMs);
   }
 
+  private mapOpts() {
+    return {
+      sensX: this.settings.sensX,
+      sensY: this.settings.sensY,
+      edgeCompress: this.settings.edgeCompress,
+    };
+  }
+
+  private tipQuality(lm: Array<{ x: number; y: number }>): number {
+    const tip8 = tip(lm, 8);
+    const edge = edgeProximity(tip8.x, tip8.y, 0.1);
+    // Partially visible: wrist or tip near border.
+    const wristEdge = edgeProximity(lm[0].x, lm[0].y, 0.06);
+    return clamp01(1 - Math.max(edge, wristEdge * 0.7));
+  }
+
   /**
    * Returns OS inject ops + viz for this frame.
    * Cursor tracks landmark 8 (never palm / pinch midpoint).
@@ -215,37 +259,69 @@ export class PrecisionController {
     screen: ScreenRect,
     nowMs: number,
   ): { ops: InjectOp[]; pose: string; cursor: Pt | null; viz: CursorViz | null } {
+    const s = this.settings;
+    const cal = s.calibration;
+    const opts = this.mapOpts();
+
     if (!landmarks || landmarks.length < 21) {
-      const ops = this.reset();
+      if (this.lostSince == null) this.lostSince = nowMs;
+      const ops: InjectOp[] = [];
+      if (nowMs - (this.lostSince ?? nowMs) >= LOST_RESET_MS) {
+        ops.push(...this.reset());
+      } else if (this.mouseDown) {
+        ops.push({ op: "up", button: "left" });
+        this.mouseDown = false;
+        ops.push({ op: "release" });
+      }
       return {
         ops,
         pose: "lost",
         cursor: null,
-        viz: { phase: "lost", u: 0.5, v: 0.5, approach: 0, hold: 0 },
+        viz: { phase: "lost", u: 0.5, v: 0.5, approach: 0, hold: 0, quality: 0 },
       };
     }
+    this.lostSince = null;
 
-    const poseClass = classifyPose(landmarks);
-    const pinchDist = dist(tip(landmarks, 8), tip(landmarks, 4));
+    const quality = this.tipQuality(landmarks);
+    const poseClass = classifyPose(landmarks, s.pinchActivate);
+    const pinchNorm = normalizedPinch(landmarks);
     const approach = clamp01(
-      1 - (pinchDist - PINCH) / Math.max(1e-6, APPROACH_START - PINCH),
+      1 - (pinchNorm - s.pinchActivate) / Math.max(1e-6, s.pinchApproach - s.pinchActivate),
     );
 
-    // Raw index tip (landmark 8) — never palm / pinch midpoint.
-    const rawTip = landmarkToScreen(landmarks[8].x, landmarks[8].y, screen);
-    const anchor = handAnchor(landmarks, screen);
+    // Control UV from landmark 8, then One Euro in desktop pixels.
+    const uvRaw = cameraToControl(landmarks[8].x, landmarks[8].y, cal, opts);
 
-    // —— Adaptive smoothing toward tip ——
-    if (!this.smoothed) {
-      this.smoothed = { ...rawTip };
-    } else {
-      const speed = dist(rawTip, this.smoothed);
-      const alpha = lerp(SMOOTH_SLOW, SMOOTH_FAST, clamp01(speed / SPEED_REF_PX));
-      this.smoothed = {
-        x: lerp(this.smoothed.x, rawTip.x, alpha),
-        y: lerp(this.smoothed.y, rawTip.y, alpha),
-      };
+    // Reject implausible UV jumps (partial hand / flicker).
+    if (this.lastUv) {
+      const jump = dist(uvRaw, this.lastUv);
+      if (jump > s.maxUvJump && quality < 0.55) {
+        // Hold last good position this frame.
+        const held = this.cursor;
+        if (held) {
+          const uv = desktopToUv(held, screen);
+          return {
+            ops: [{ op: "move", x: Math.round(held.x), y: Math.round(held.y) }],
+            pose: "point",
+            cursor: held,
+            viz: {
+              phase: "point",
+              u: uv.x,
+              v: uv.y,
+              approach,
+              hold: 0,
+              quality,
+            },
+          };
+        }
+      }
     }
+    this.lastUv = uvRaw;
+
+    const rawTip = controlToDesktop(uvRaw.x, uvRaw.y, screen);
+    const filtered = this.filter.filter(rawTip.x, rawTip.y, nowMs);
+    const smoothed: Pt = { x: filtered.x, y: filtered.y };
+    const anchor = handAnchor(landmarks, screen, cal, opts);
 
     const ops: InjectOp[] = [];
 
@@ -261,22 +337,21 @@ export class PrecisionController {
         this.didDrag = false;
       }
       this.releasing = false;
-      const c = this.smoothed!;
-      this.cursor = c;
-      ops.push({ op: "move", x: Math.round(c.x), y: Math.round(c.y) });
+      this.cursor = smoothed;
+      ops.push({ op: "move", x: Math.round(smoothed.x), y: Math.round(smoothed.y) });
       if (!this.wasFist) {
         this.wasFist = true;
         this.windowDragging = true;
-        ops.push({ op: "win_grab", x: Math.round(c.x), y: Math.round(c.y) });
+        ops.push({ op: "win_grab", x: Math.round(smoothed.x), y: Math.round(smoothed.y) });
       } else if (this.windowDragging) {
-        ops.push({ op: "win_drag", x: Math.round(c.x), y: Math.round(c.y) });
+        ops.push({ op: "win_drag", x: Math.round(smoothed.x), y: Math.round(smoothed.y) });
       }
-      const uv = toUv(c, screen);
+      const uv = desktopToUv(smoothed, screen);
       return {
         ops,
         pose: "fist",
-        cursor: c,
-        viz: { phase: "fist", u: uv.u, v: uv.v, approach: 0, hold: 0 },
+        cursor: smoothed,
+        viz: { phase: "fist", u: uv.x, v: uv.y, approach: 0, hold: 0, quality },
       };
     }
     if (this.wasFist) {
@@ -298,9 +373,8 @@ export class PrecisionController {
         this.lockPos = null;
       }
       this.releasing = false;
-      const c = this.smoothed!;
-      this.cursor = c;
-      ops.push({ op: "move", x: Math.round(c.x), y: Math.round(c.y) });
+      this.cursor = smoothed;
+      ops.push({ op: "move", x: Math.round(smoothed.x), y: Math.round(smoothed.y) });
       if (this.scrollAnchorY == null) {
         this.scrollAnchorY = landmarks[8].y;
       } else {
@@ -311,12 +385,12 @@ export class PrecisionController {
           this.scrollAnchorY = landmarks[8].y;
         }
       }
-      const uv = toUv(c, screen);
+      const uv = desktopToUv(smoothed, screen);
       return {
         ops,
         pose: "two_finger",
-        cursor: c,
-        viz: { phase: "scroll", u: uv.u, v: uv.v, approach: 0, hold: 0 },
+        cursor: smoothed,
+        viz: { phase: "scroll", u: uv.x, v: uv.y, approach: 0, hold: 0, quality },
       };
     }
     this.scrollAnchorY = null;
@@ -325,8 +399,8 @@ export class PrecisionController {
     if (this.releasing && this.releaseFrom) {
       const t = clamp01((nowMs - this.releaseStartMs) / RELEASE_BLEND_MS);
       const blended = {
-        x: lerp(this.releaseFrom.x, this.smoothed!.x, t),
-        y: lerp(this.releaseFrom.y, this.smoothed!.y, t),
+        x: lerp(this.releaseFrom.x, smoothed.x, t),
+        y: lerp(this.releaseFrom.y, smoothed.y, t),
       };
       this.cursor = blended;
       ops.push({ op: "move", x: Math.round(blended.x), y: Math.round(blended.y) });
@@ -334,50 +408,50 @@ export class PrecisionController {
         this.releasing = false;
         this.releaseFrom = null;
       }
-      // Allow re-lock if user pinches again mid-release
-      if (pinchDist > LOCK_DIST) {
-        const uv = toUv(blended, screen);
+      if (pinchNorm > s.pinchRelease) {
+        const uv = desktopToUv(blended, screen);
         return {
           ops,
           pose: "releasing",
           cursor: blended,
-          viz: { phase: "releasing", u: uv.u, v: uv.v, approach, hold: 0 },
+          viz: { phase: "releasing", u: uv.x, v: uv.y, approach, hold: 0, quality },
         };
       }
       this.releasing = false;
       this.releaseFrom = null;
     }
 
-    // —— Pinch lock / click / drag ——
-    const wantLock = pinchDist <= LOCK_DIST;
+    // —— Pinch lock / click / drag (hysteresis: activate vs release) ——
+    const wantLock =
+      this.pinchMode === "idle"
+        ? pinchNorm <= s.pinchActivate
+        : pinchNorm <= s.pinchRelease;
 
     if (wantLock) {
       if (this.pinchMode === "idle") {
-        // Lock at current tip — before contact jitter.
-        this.lockPos = { ...(this.cursor ?? this.smoothed!) };
+        this.lockPos = { ...(this.cursor ?? smoothed) };
         this.pinchMode = "locked";
         this.pinchStartMs = nowMs;
         this.dragAnchor0 = { ...anchor };
         this.didDrag = false;
+        // Freeze filter at lock so release doesn't inherit pinch velocity.
+        this.filter.reset(this.lockPos);
       }
 
       const lock = this.lockPos!;
       const holdMs = nowMs - this.pinchStartMs;
-      const hold = clamp01(holdMs / DRAG_ARM_MS);
-      const moveFromStart = this.dragAnchor0
-        ? dist(anchor, this.dragAnchor0)
-        : 0;
+      const hold = clamp01(holdMs / s.dragArmMs);
+      const moveFromStart = this.dragAnchor0 ? dist(anchor, this.dragAnchor0) : 0;
 
-      if (this.pinchMode === "locked" && holdMs >= DRAG_ARM_MS) {
+      if (this.pinchMode === "locked" && holdMs >= s.dragArmMs) {
         this.pinchMode = "drag_ready";
       }
 
       if (
         (this.pinchMode === "drag_ready" || this.pinchMode === "locked") &&
-        holdMs >= DRAG_ARM_MS &&
-        moveFromStart >= DRAG_MOVE_PX
+        holdMs >= s.dragArmMs &&
+        moveFromStart >= s.dragMovePx
       ) {
-        // Arm drag: mouse down at lock, then follow hand anchor delta.
         this.pinchMode = "dragging";
         this.didDrag = true;
         this.dragAnchor0 = { ...anchor };
@@ -393,47 +467,60 @@ export class PrecisionController {
         };
         this.cursor = c;
         ops.push({ op: "move", x: Math.round(c.x), y: Math.round(c.y) });
-        const uv = toUv(c, screen);
+        const uv = desktopToUv(c, screen);
         return {
           ops,
           pose: "dragging",
           cursor: c,
-          viz: { phase: "dragging", u: uv.u, v: uv.v, approach: 1, hold: 1 },
+          viz: {
+            phase: "dragging",
+            u: uv.x,
+            v: uv.y,
+            approach: 1,
+            hold: 1,
+            locked: true,
+            quality,
+          },
         };
       }
 
-      // Locked / drag_ready — cursor stays put; ignore tip jitter from pinch.
       this.cursor = lock;
       ops.push({ op: "move", x: Math.round(lock.x), y: Math.round(lock.y) });
       const phase: CursorPhase =
         this.pinchMode === "drag_ready" ? "drag_ready" : "locked";
-      const uv = toUv(lock, screen);
+      const uv = desktopToUv(lock, screen);
       return {
         ops,
         pose: phase,
         cursor: lock,
-        viz: { phase, u: uv.u, v: uv.v, approach: 1, hold },
+        viz: {
+          phase,
+          u: uv.x,
+          v: uv.y,
+          approach: 1,
+          hold,
+          locked: true,
+          quality,
+        },
       };
     }
 
-    // Pinch released
     if (this.pinchMode !== "idle") {
       this.endPinchGesture(nowMs, ops);
-      const c = this.cursor ?? this.smoothed!;
+      const c = this.cursor ?? smoothed;
       ops.push({ op: "move", x: Math.round(c.x), y: Math.round(c.y) });
-      const uv = toUv(c, screen);
+      const uv = desktopToUv(c, screen);
       return {
         ops,
         pose: "releasing",
         cursor: c,
-        viz: { phase: "releasing", u: uv.u, v: uv.v, approach, hold: 0 },
+        viz: { phase: "releasing", u: uv.x, v: uv.y, approach, hold: 0, quality },
       };
     }
 
     // —— Normal pointing with approach dampening ——
-    let target = this.smoothed!;
-    if (approach > 0 && pinchDist > LOCK_DIST) {
-      // Progressively freeze as fingers close — stabilize before lock.
+    let target = smoothed;
+    if (approach > 0 && pinchNorm > s.pinchActivate) {
       const damp = 1 - approach * 0.92;
       if (this.cursor) {
         target = {
@@ -445,12 +532,12 @@ export class PrecisionController {
     this.cursor = target;
     ops.push({ op: "move", x: Math.round(target.x), y: Math.round(target.y) });
     const phase: CursorPhase = approach > 0.15 ? "approach" : "point";
-    const uv = toUv(target, screen);
+    const uv = desktopToUv(target, screen);
     return {
       ops,
       pose: phase === "approach" ? "approach" : "point",
       cursor: target,
-      viz: { phase, u: uv.u, v: uv.v, approach, hold: 0 },
+      viz: { phase, u: uv.x, v: uv.y, approach, hold: 0, quality },
     };
   }
 }

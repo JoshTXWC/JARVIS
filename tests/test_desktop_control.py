@@ -11,8 +11,11 @@ from jarvis.integrations.desktop_control.actions import (
 )
 from jarvis.integrations.desktop_control.coords import (
     Calibration,
+    OneEuroFilter2D,
+    OneEuroParams,
     ScreenRect,
     apply_calibration,
+    edge_proximity,
     landmark_to_screen,
     uv_to_screen,
 )
@@ -178,6 +181,27 @@ class TestCoords:
         x1, y1, prev = uv_to_screen(0.5, 0.5, screen)
         x2, y2, _ = uv_to_screen(0.501, 0.501, screen, dead_zone=0.01, prev_uv=prev)
         assert (x2, y2) == (x1, y1)
+
+    def test_edge_proximity_and_sensitivity(self):
+        assert edge_proximity(0.5, 0.5) == 0.0
+        assert edge_proximity(0.01, 0.5) > 0.5
+        cal = Calibration(0.0, 0.0, 1.0, 1.0)
+        u0, _ = apply_calibration(0.25, 0.5, cal, sens_x=1.0)
+        u1, _ = apply_calibration(0.25, 0.5, cal, sens_x=1.5)
+        # mirrored 0.25 → 0.75; higher sens pulls farther from center
+        assert abs(u1 - 0.5) >= abs(u0 - 0.5)
+
+    def test_one_euro_stationary_and_jump(self):
+        f = OneEuroFilter2D(OneEuroParams(min_cutoff=1.0, beta=0.02, dead_zone=0.002, max_jump=0.2))
+        x, y = f.filter(0.5, 0.5, 0)
+        xs = []
+        for i in range(1, 40):
+            x, y = f.filter(0.5 + 0.0004 * ((-1) ** i), 0.5, i * 16)
+            xs.append(x)
+        assert max(xs) - min(xs) < 0.01
+        # Implausible jump reseats
+        x2, _ = f.filter(0.5 + 0.5, 0.5, 40 * 16)
+        assert x2 == pytest.approx(1.0)
 
 
 class TestPrecisionEngine:

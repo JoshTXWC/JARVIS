@@ -19,6 +19,8 @@
     tracking: false,
     hands: [],
     cursor: null,
+    videoW: 1280,
+    videoH: 720,
     collapsed: false,
     lastFrameAt: 0,
     pulseT: 0,
@@ -33,18 +35,35 @@
   window.addEventListener("resize", resize);
   resize();
 
-  function mapPt(p) {
-    return { x: (1 - p[0]) * window.innerWidth, y: p[1] * window.innerHeight };
+  /**
+   * Skeleton = camera space → mirrored object-cover over the overlay window.
+   * Cursor = calibrated desktop UV (separate transform — do not reuse mapPt).
+   */
+  function mapSkeletonPt(p) {
+    const viewW = window.innerWidth;
+    const viewH = window.innerHeight;
+    const videoW = state.videoW || 1280;
+    const videoH = state.videoH || 720;
+    const scale = Math.max(viewW / videoW, viewH / videoH);
+    const dispW = videoW * scale;
+    const dispH = videoH * scale;
+    const offsetX = (viewW - dispW) / 2;
+    const offsetY = (viewH - dispH) / 2;
+    const nx = 1 - Math.min(1, Math.max(0, p[0]));
+    const ny = Math.min(1, Math.max(0, p[1]));
+    return { x: offsetX + nx * dispW, y: offsetY + ny * dispH };
   }
 
   function cursorPx(c) {
     if (!c) return null;
+    // Desktop UV already accounts for virtual-screen origin; overlay spans virtual bounds.
     return {
       x: c.u * window.innerWidth,
       y: c.v * window.innerHeight,
       phase: c.phase || "point",
       approach: typeof c.approach === "number" ? c.approach : 0,
       hold: typeof c.hold === "number" ? c.hold : 0,
+      locked: !!c.locked,
     };
   }
 
@@ -159,7 +178,7 @@
 
     if (state.viz === "skeleton" && state.hands.length) {
       for (const hand of state.hands) {
-        const pts = hand.map(mapPt);
+        const pts = hand.map(mapSkeletonPt);
         ctx.strokeStyle = "rgba(34,211,238,0.5)";
         ctx.lineWidth = 2;
         ctx.lineCap = "round";
@@ -173,8 +192,8 @@
           ctx.stroke();
         }
         for (let i = 0; i < pts.length; i++) {
-          if (i === 8) continue; // tip drawn via control cursor
-          const tip = i === 4 || i === 12 || i === 16 || i === 20;
+          // Landmark 8 still drawn for skeleton fidelity; OS cursor uses separate UV.
+          const tip = i === 4 || i === 8 || i === 12 || i === 16 || i === 20;
           ctx.beginPath();
           ctx.fillStyle = tip ? "rgba(224,242,254,0.85)" : "rgba(125,211,252,0.7)";
           ctx.arc(pts[i].x, pts[i].y, tip ? 4 : 2.8, 0, Math.PI * 2);
@@ -183,13 +202,15 @@
       }
     }
 
-    // Prefer controller cursor (aligned to OS pointer); fallback to landmark 8.
+    // Calibrated desktop cursor (may intentionally differ from skeleton tip).
     var c = cursorPx(state.cursor);
-    if (!c && state.hands.length && state.hands[0] && state.hands[0][8]) {
-      var tip = mapPt(state.hands[0][8]);
+    if (!c && state.viz === "minimal" && state.hands.length && state.hands[0] && state.hands[0][8]) {
+      var tip = mapSkeletonPt(state.hands[0][8]);
       c = { x: tip.x, y: tip.y, phase: "point", approach: 0, hold: 0 };
     }
-    if (c && state.tracking) drawCursor(c);
+    if (c && state.tracking && (state.viz === "skeleton" || state.viz === "minimal")) {
+      drawCursor(c);
+    }
 
     ctx.globalAlpha = 1;
   }
@@ -216,6 +237,8 @@
     state.lastFrameAt = Date.now();
     state.hands = (frame && frame.hands) || [];
     state.cursor = (frame && frame.cursor) || null;
+    if (frame && frame.videoW) state.videoW = frame.videoW;
+    if (frame && frame.videoH) state.videoH = frame.videoH;
     state.tracking = !(frame && frame.lost) && (state.hands.length > 0 || !!state.cursor);
     if (frame && frame.poses && frame.poses.length) state.gesture = frame.poses[0];
     else state.gesture = state.tracking ? "track" : "seeking";

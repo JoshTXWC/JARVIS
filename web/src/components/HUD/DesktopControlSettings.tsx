@@ -9,6 +9,7 @@ import {
   setDesktopInjectArmed,
 } from "../../lib/hands/desktopBridge";
 import { useStore } from "../../lib/store";
+import TrackingPrecisionPanel from "./TrackingPrecisionPanel";
 
 type Mode = "hud" | "precision" | "spatial";
 type Viz = "skeleton" | "minimal" | "hidden";
@@ -209,10 +210,10 @@ export default function DesktopControlSettings() {
         </div>
       </div>
 
-      {/* Feel */}
+      {/* Legacy backend feel (WS path) — primary tuning is Tracking & Precision */}
       <div className="space-y-3">
         <SliderRow
-          label="Sensitivity"
+          label="Backend sensitivity"
           value={sensitivity}
           min={0.4}
           max={2.2}
@@ -221,7 +222,7 @@ export default function DesktopControlSettings() {
           onCommit={(v) => void apply({ sensitivity: v })}
         />
         <SliderRow
-          label="Smooth"
+          label="Backend smooth"
           value={smoothing}
           min={0}
           max={0.85}
@@ -229,10 +230,9 @@ export default function DesktopControlSettings() {
           onChange={setSmoothing}
           onCommit={(v) => void apply({ smoothing: v })}
         />
-        <p className="text-[10px] text-jarvis-ice/35 -mt-1 px-1">
-          Tip cursor is raw (no smooth lag). Smooth only affects legacy backend path.
-        </p>
       </div>
+
+      <TrackingPrecisionPanel />
 
       <div className="grid grid-cols-2 gap-2">
         <SegBtn

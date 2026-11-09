@@ -150,9 +150,9 @@ model:
   #   Grok 4 / Grok 4 Fast  → XAI_API_KEY    → https://api.x.ai/v1
   #   Gemini 2.5 Flash/Pro  → GEMINI_API_KEY → Google OpenAI-compatible route
   provider: openai_compatible
-  endpoint: https://generativelanguage.googleapis.com/v1beta/openai
-  model: gemini-3.1-flash-lite
-  api_key_env: GEMINI_API_KEY
+  endpoint: http://localhost:11434/v1
+  model: auto
+  api_key_env: OLLAMA_API_KEY
   # Restored when leaving a cloud model via the switcher.
   local_endpoint: http://localhost:11434/v1
   local_api_key_env: OLLAMA_API_KEY
