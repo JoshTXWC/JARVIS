@@ -13,6 +13,7 @@ const ALLOWED_OUT = new Set([
   "jarvis:show",
   "jarvis:hide",
   "jarvis:toggle-visibility",
+  "jarvis:set-window-mode",
   "jarvis:hands-overlay-frame",
   "jarvis:hands-active",
   "jarvis:desktop-overlay-open",

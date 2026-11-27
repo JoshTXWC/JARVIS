@@ -3,7 +3,8 @@
  * Rounded input · + tools menu · mode pill · model picker popup · mic + send.
  */
 import * as React from "react";
-import { useRef, useState, useEffect, useCallback, useMemo } from "react";
+import { createPortal } from "react-dom";
+import { useRef, useState, useEffect, useLayoutEffect, useCallback, useMemo } from "react";
 import {
   ChevronDown,
   ImagePlus,
@@ -29,6 +30,11 @@ import {
   CircleMinus,
   Download,
   Brain,
+  Gauge,
+  Zap,
+  Trash2,
+  HardDrive,
+  Cpu,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -47,9 +53,10 @@ export type LoadedModelInfo = {
   loadable?: boolean;
 };
 
-export type ReasoningLevel = "none" | "low" | "medium" | "high";
+export type ReasoningLevel = "none" | "low" | "medium" | "high" | "very_high";
 
 const VOICE_BARS = 9;
+const DEFAULT_REASONING_LEVELS = ["low", "medium", "high", "very_high"];
 
 /* ── Types ─────────────────────────────────────────────────────────────── */
 
@@ -65,6 +72,12 @@ export type PromptModelOption = {
   installed?: boolean;
   summary?: string;
   pull?: string | null;
+  vram_gb?: number;
+  ram_gb?: number;
+  size_gb?: number | null;
+  fit?: string;
+  fit_label?: string;
+  needs?: string;
 };
 
 export type PromptToolOption = {
@@ -205,6 +218,154 @@ function ModelIconFallback({ family, className }: { family: ModelFamily; classNa
       <rect x="7" y="7" width="10" height="10" rx="2" />
       <path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3" strokeLinecap="round" />
     </svg>
+  );
+}
+
+function reasoningMeta(level: string): {
+  id: string;
+  label: string;
+  Icon: typeof Brain;
+  hint: string;
+} {
+  const id = String(level || "none").toLowerCase().replace(/\s+/g, "_");
+  if (id === "low") {
+    return { id, label: "Low", Icon: Zap, hint: "Fastest replies, lighter thinking" };
+  }
+  if (id === "medium") {
+    return { id, label: "Medium", Icon: Gauge, hint: "Balanced depth and speed" };
+  }
+  if (id === "high") {
+    return { id, label: "High", Icon: Brain, hint: "Deeper chain-of-thought" };
+  }
+  if (id === "very_high" || id === "xhigh" || id === "veryhigh") {
+    return { id: "very_high", label: "Very high", Icon: Sparkles, hint: "Maximum reasoning depth" };
+  }
+  return { id: "none", label: "Off", Icon: CircleMinus, hint: "No extra reasoning effort" };
+}
+
+function formatGb(n?: number | null): string | null {
+  if (n == null || !Number.isFinite(n) || n <= 0) return null;
+  return n >= 10 ? `${Math.round(n)} GB` : `${n.toFixed(1)} GB`;
+}
+
+function ModelSpecs({ m }: { m: PromptModelOption }) {
+  const vram = formatGb(m.vram_gb);
+  const ram = formatGb(m.ram_gb);
+  const size = formatGb(m.size_gb ?? null);
+  if (!vram && !ram && !size && !m.fit_label) return null;
+  return (
+    <span className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[10px] text-[#71767b]">
+      {vram && (
+        <span className="inline-flex items-center gap-0.5" title={`~${vram} VRAM recommended`}>
+          <Cpu className="size-2.5 opacity-80" />
+          {vram}
+        </span>
+      )}
+      {ram && (
+        <span className="inline-flex items-center gap-0.5" title={`~${ram} system RAM`}>
+          <MemoryStick className="size-2.5 opacity-80" />
+          {ram}
+        </span>
+      )}
+      {size && (
+        <span className="inline-flex items-center gap-0.5" title={`~${size} on disk`}>
+          <HardDrive className="size-2.5 opacity-80" />
+          {size}
+        </span>
+      )}
+      {m.fit_label && (
+        <span
+          className={cn(
+            "rounded px-1 py-px font-medium uppercase tracking-wide",
+            m.fit === "fits" && "bg-emerald-500/15 text-emerald-300",
+            m.fit === "tight" && "bg-amber-500/15 text-amber-300",
+            (m.fit === "heavy" || m.fit === "no") && "bg-red-500/15 text-red-300",
+            !m.fit && "bg-white/10 text-[#71767b]",
+          )}
+          title={m.needs || m.fit_label}
+        >
+          {m.fit_label}
+        </span>
+      )}
+    </span>
+  );
+}
+
+/** Portal popups to <body> so Floating overflow/transform cannot clip them. */
+function useAnchoredPopup(open: boolean) {
+  const anchorRef = useRef<HTMLDivElement>(null);
+  const popupRef = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+
+    const place = () => {
+      const anchor = anchorRef.current;
+      const popup = popupRef.current;
+      if (!anchor || !popup) return;
+
+      const a = anchor.getBoundingClientRect();
+      const pad = 8;
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      const pw = Math.max(popup.offsetWidth, 160);
+      const ph = Math.max(popup.offsetHeight, 40);
+
+      let left = a.left;
+      let top = a.top - ph - 10;
+      if (top < pad) top = a.bottom + 10;
+      if (top + ph > vh - pad) top = Math.max(pad, vh - ph - pad);
+      if (left + pw > vw - pad) left = Math.max(pad, vw - pw - pad);
+      if (left < pad) left = pad;
+
+      popup.style.position = "fixed";
+      popup.style.left = `${Math.round(left)}px`;
+      popup.style.top = `${Math.round(top)}px`;
+      popup.style.right = "auto";
+      popup.style.bottom = "auto";
+      popup.style.zIndex = "200";
+    };
+
+    place();
+    const raf = requestAnimationFrame(place);
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(place) : null;
+    if (popupRef.current) ro?.observe(popupRef.current);
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      cancelAnimationFrame(raf);
+      ro?.disconnect();
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
+  }, [open]);
+
+  return { anchorRef, popupRef };
+}
+
+function PopupPortal({
+  open,
+  popupRef,
+  className,
+  children,
+}: {
+  open: boolean;
+  popupRef: React.MutableRefObject<HTMLDivElement | null>;
+  className?: string;
+  children: React.ReactNode;
+}) {
+  if (!open || typeof document === "undefined") return null;
+  return createPortal(
+    <div
+      ref={(node) => {
+        popupRef.current = node;
+      }}
+      data-jarvis-popup
+      className={className}
+    >
+      {children}
+    </div>,
+    document.body,
   );
 }
 
@@ -433,6 +594,8 @@ export interface PromptInputProps {
   loadedModels?: LoadedModelInfo[];
   onUnloadModel?: (id: string) => void;
   onPullModel?: (id: string) => void;
+  onDeleteModel?: (id: string) => void;
+  modelBusyId?: string | null;
   onRefreshLoaded?: () => void;
   reasoningEffort?: ReasoningLevel | string;
   reasoningLevels?: string[];
@@ -470,9 +633,11 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
       loadedModels = [],
       onUnloadModel,
       onPullModel,
+      onDeleteModel,
+      modelBusyId = null,
       onRefreshLoaded,
-      reasoningEffort = "none",
-      reasoningLevels = ["none", "low", "medium", "high"],
+      reasoningEffort = "medium",
+      reasoningLevels = DEFAULT_REASONING_LEVELS,
       onReasoningEffortChange,
     },
     ref,
@@ -494,11 +659,16 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
     const [toolsOpen, setToolsOpen] = useState(false);
     const [contextOpen, setContextOpen] = useState(false);
     const [reasoningOpen, setReasoningOpen] = useState(false);
+    const [modelTab, setModelTab] = useState<"installed" | "available">("installed");
     const [modelQuery, setModelQuery] = useState("");
     const [toolQuery, setToolQuery] = useState("");
     const [toolFilter, setToolFilter] = useState<"fav" | "all">("all");
     const [toolFavs, setToolFavs] = useState<string[]>(() => loadStringList(TOOL_FAV_KEY));
     const [autoOn, setAutoOn] = useState(!!autoModel);
+    const toolsAnchor = useAnchoredPopup(toolsOpen);
+    const reasoningAnchor = useAnchoredPopup(reasoningOpen);
+    const contextAnchor = useAnchoredPopup(contextOpen);
+    const modelAnchor = useAnchoredPopup(modelOpen);
     const [attachments, setAttachments] = useState<Attachment[]>([]);
     const [activeAttachment, setActiveAttachment] = useState<{
       attachment: Attachment;
@@ -543,12 +713,15 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
     useEffect(() => {
       if (!modelOpen && !toolsOpen && !contextOpen && !reasoningOpen) return;
       const onDown = (e: MouseEvent) => {
-        if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
-          setModelOpen(false);
-          setToolsOpen(false);
-          setContextOpen(false);
-          setReasoningOpen(false);
-        }
+        const t = e.target as Node | null;
+        if (!t) return;
+        const el = t instanceof Element ? t : t.parentElement;
+        if (rootRef.current?.contains(t)) return;
+        if (el?.closest?.("[data-jarvis-popup]")) return;
+        setModelOpen(false);
+        setToolsOpen(false);
+        setContextOpen(false);
+        setReasoningOpen(false);
       };
       const onKey = (e: KeyboardEvent) => {
         if (e.key === "Escape") {
@@ -590,13 +763,11 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
 
     const filteredModels = useMemo(() => {
       const needle = modelQuery.trim().toLowerCase();
-      // Downloaded locals/cloud + catalog entries that can still be pulled.
       let list = catalog.filter((m) => {
         if (m.id === "auto") return false;
-        if (m.installed) return true;
-        if (m.cloud) return true;
-        if (m.pull) return true;
-        return false;
+        const installed = !!m.installed || !!m.cloud;
+        if (modelTab === "installed") return installed;
+        return !installed && (!!m.pull || m.tier === "light" || m.tier === "medium" || m.tier === "heavy");
       });
       if (needle) {
         list = list.filter(
@@ -608,12 +779,28 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
         );
       }
       return [...list].sort((a, b) => {
-        const ai = a.installed || a.cloud ? 0 : 1;
-        const bi = b.installed || b.cloud ? 0 : 1;
-        if (ai !== bi) return ai - bi;
-        return a.label.localeCompare(b.label);
+        const ar = a.recommended ? 0 : 1;
+        const br = b.recommended ? 0 : 1;
+        if (ar !== br) return ar - br;
+        return (a.vram_gb || 0) - (b.vram_gb || 0) || a.label.localeCompare(b.label);
       });
-    }, [catalog, modelQuery]);
+    }, [catalog, modelQuery, modelTab]);
+
+    const installedCount = useMemo(
+      () => catalog.filter((m) => m.id !== "auto" && (m.installed || m.cloud)).length,
+      [catalog],
+    );
+    const availableCount = useMemo(
+      () =>
+        catalog.filter(
+          (m) =>
+            m.id !== "auto" &&
+            !m.installed &&
+            !m.cloud &&
+            (!!m.pull || m.tier === "light" || m.tier === "medium" || m.tier === "heavy"),
+        ).length,
+      [catalog],
+    );
 
     const filteredTools = useMemo(() => {
       const needle = toolQuery.trim().toLowerCase();
@@ -792,10 +979,8 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
     };
 
     const favToolCount = toolFavs.filter((n) => tools.some((t) => t.name === n)).length;
-    const reasoningLabel =
-      !reasoningEffort || reasoningEffort === "none"
-        ? "Reasoning"
-        : `Reason ${String(reasoningEffort)}`;
+    const activeReasoning = reasoningMeta(String(reasoningEffort || "none"));
+    const ReasoningIcon = activeReasoning.Icon;
     const ctxLimit = Math.max(1, contextLimit || 8192);
     const ctxUsed = Math.max(0, contextUsed || 0);
     const ctxPct = Math.min(100, Math.round((ctxUsed / ctxLimit) * 100));
@@ -882,7 +1067,7 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
             />
 
             <div className="flex items-center gap-1.5 px-3 pb-3 pt-1">
-              <div className="relative">
+              <div className="relative" ref={toolsAnchor.anchorRef}>
                 <button
                   type="button"
                   onMouseDown={(e) => e.preventDefault()}
@@ -896,8 +1081,11 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
                   <Plus className="size-4" strokeWidth={1.75} />
                 </button>
 
-                {toolsOpen && (
-                  <div className="absolute bottom-[calc(100%+10px)] left-0 z-50 w-[300px] overflow-hidden rounded-2xl border border-white/[0.08] bg-[#242428] shadow-[0_18px_50px_-12px_rgba(0,0,0,0.75)]">
+                <PopupPortal
+                  open={toolsOpen}
+                  popupRef={toolsAnchor.popupRef}
+                  className="w-[300px] max-h-[min(420px,70vh)] overflow-hidden rounded-2xl border border-white/[0.08] bg-[#242428] shadow-[0_18px_50px_-12px_rgba(0,0,0,0.75)]"
+                >
                     <div className="border-b border-white/[0.06] p-2.5">
                       <div className="flex items-center gap-2 rounded-xl bg-white/[0.04] px-2.5 py-2 text-[#71767b]">
                         <Search className="size-3.5 shrink-0" />
@@ -1029,12 +1217,11 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
                         </div>
                       )}
                     </div>
-                  </div>
-                )}
+                </PopupPortal>
               </div>
 
               {onReasoningEffortChange && (
-                <div className="relative">
+                <div className="relative" ref={reasoningAnchor.anchorRef}>
                   <button
                     type="button"
                     onMouseDown={(e) => e.preventDefault()}
@@ -1043,43 +1230,52 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
                       "inline-flex h-8 items-center gap-1.5 rounded-full border border-white/[0.08] bg-white/[0.04] px-2.5 text-[13px] font-medium text-[#e7e9ea]/90 transition hover:bg-white/[0.08]",
                       reasoningOpen && "bg-white/[0.1]",
                     )}
-                    aria-label={`Reasoning level. Current: ${reasoningEffort || "none"}`}
+                    aria-label={`Reasoning level. Current: ${activeReasoning.label}`}
+                    title={activeReasoning.hint}
                   >
-                    <Brain className="size-3.5 opacity-80" />
-                    <span className="capitalize">{reasoningLabel}</span>
+                    <ReasoningIcon className="size-3.5 opacity-80" />
+                    <span>{activeReasoning.label}</span>
                     <ChevronDown className="size-3.5 opacity-60" />
                   </button>
-                  {reasoningOpen && (
-                    <div className="absolute bottom-[calc(100%+10px)] left-0 z-50 min-w-[160px] overflow-hidden rounded-2xl border border-white/[0.08] bg-[#242428] p-1 shadow-[0_18px_50px_-12px_rgba(0,0,0,0.75)]">
-                      {(reasoningLevels.length
-                        ? reasoningLevels
-                        : ["none", "low", "medium", "high"]
-                      ).map((lvl) => {
-                        const active = (reasoningEffort || "none") === lvl;
+                  <PopupPortal
+                    open={reasoningOpen}
+                    popupRef={reasoningAnchor.popupRef}
+                    className="min-w-[200px] overflow-hidden rounded-2xl border border-white/[0.08] bg-[#242428] p-1 shadow-[0_18px_50px_-12px_rgba(0,0,0,0.75)]"
+                  >
+                    {(reasoningLevels.length ? reasoningLevels : DEFAULT_REASONING_LEVELS).map(
+                      (lvl) => {
+                        const meta = reasoningMeta(lvl);
+                        const Icon = meta.Icon;
+                        const active =
+                          reasoningMeta(String(reasoningEffort || "none")).id === meta.id;
                         return (
                           <button
                             key={lvl}
                             type="button"
                             onMouseDown={(e) => e.preventDefault()}
                             onClick={() => {
-                              onReasoningEffortChange(lvl);
+                              onReasoningEffortChange(meta.id);
                               setReasoningOpen(false);
                             }}
                             className={cn(
-                              "flex w-full items-center rounded-xl px-3 py-2 text-left text-sm capitalize text-[#e7e9ea]/85 hover:bg-white/[0.06]",
+                              "flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-left text-sm text-[#e7e9ea]/85 hover:bg-white/[0.06]",
                               active && "bg-white/[0.08] text-white",
                             )}
                           >
-                            {lvl}
+                            <Icon className="size-3.5 shrink-0 opacity-80" />
+                            <span className="min-w-0 flex-1">
+                              <span className="block font-medium">{meta.label}</span>
+                              <span className="block text-[11px] text-[#71767b]">{meta.hint}</span>
+                            </span>
                           </button>
                         );
-                      })}
-                    </div>
-                  )}
+                      },
+                    )}
+                  </PopupPortal>
                 </div>
               )}
 
-              <div className="relative">
+              <div className="relative" ref={contextAnchor.anchorRef}>
                 <button
                   type="button"
                   onMouseDown={(e) => e.preventDefault()}
@@ -1095,39 +1291,41 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
                   <Database className="size-3.5 shrink-0 opacity-80" />
                   <span className="tabular-nums font-medium">{ctxPct}%</span>
                 </button>
-                {contextOpen && (
-                  <div className="absolute bottom-[calc(100%+10px)] left-0 z-50 w-[260px] overflow-hidden rounded-2xl border border-white/[0.08] bg-[#242428] p-3 shadow-[0_18px_50px_-12px_rgba(0,0,0,0.75)]">
-                    <div className="text-sm font-medium text-[#e7e9ea]">Context</div>
-                    <p className="mt-1 text-[12px] text-[#71767b]">
-                      Tokens in the active conversation window versus the model limit.
-                    </p>
-                    <div className="mt-3 h-2 overflow-hidden rounded-full bg-white/[0.08]">
-                      <div
-                        className={cn(
-                          "h-full rounded-full transition-all",
-                          ctxPct >= 90
-                            ? "bg-red-400"
-                            : ctxPct >= 70
-                              ? "bg-amber-400"
-                              : "bg-[#1d9bf0]",
-                        )}
-                        style={{ width: `${ctxPct}%` }}
-                      />
-                    </div>
-                    <div className="mt-2 flex items-center justify-between text-[12px] tabular-nums text-[#e7e9ea]/85">
-                      <span>{ctxUsed.toLocaleString()} used</span>
-                      <span className="text-[#71767b]">{ctxLimit.toLocaleString()} max</span>
-                    </div>
-                    {loadedModels[0]?.context_length ? (
-                      <div className="mt-2 text-[11px] text-[#71767b]">
-                        Loaded ctx · {loadedModels[0].context_length.toLocaleString()}
-                      </div>
-                    ) : null}
+                <PopupPortal
+                  open={contextOpen}
+                  popupRef={contextAnchor.popupRef}
+                  className="w-[260px] overflow-hidden rounded-2xl border border-white/[0.08] bg-[#242428] p-3 shadow-[0_18px_50px_-12px_rgba(0,0,0,0.75)]"
+                >
+                  <div className="text-sm font-medium text-[#e7e9ea]">Context</div>
+                  <p className="mt-1 text-[12px] text-[#71767b]">
+                    Tokens in the active conversation window versus the model limit.
+                  </p>
+                  <div className="mt-3 h-2 overflow-hidden rounded-full bg-white/[0.08]">
+                    <div
+                      className={cn(
+                        "h-full rounded-full transition-all",
+                        ctxPct >= 90
+                          ? "bg-red-400"
+                          : ctxPct >= 70
+                            ? "bg-amber-400"
+                            : "bg-[#1d9bf0]",
+                      )}
+                      style={{ width: `${ctxPct}%` }}
+                    />
                   </div>
-                )}
+                  <div className="mt-2 flex items-center justify-between text-[12px] tabular-nums text-[#e7e9ea]/85">
+                    <span>{ctxUsed.toLocaleString()} used</span>
+                    <span className="text-[#71767b]">{ctxLimit.toLocaleString()} max</span>
+                  </div>
+                  {loadedModels[0]?.context_length ? (
+                    <div className="mt-2 text-[11px] text-[#71767b]">
+                      Loaded ctx · {loadedModels[0].context_length.toLocaleString()}
+                    </div>
+                  ) : null}
+                </PopupPortal>
               </div>
 
-              <div className="relative min-w-0">
+              <div className="relative min-w-0" ref={modelAnchor.anchorRef}>
                 <button
                   type="button"
                   onMouseDown={(e) => e.preventDefault()}
@@ -1148,8 +1346,11 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
                   <ChevronDown className="size-3.5 shrink-0 opacity-55" />
                 </button>
 
-                {modelOpen && (
-                  <div className="absolute bottom-[calc(100%+10px)] left-0 z-50 w-[320px] overflow-hidden rounded-2xl border border-white/[0.08] bg-[#242428] shadow-[0_18px_50px_-12px_rgba(0,0,0,0.75)]">
+                <PopupPortal
+                  open={modelOpen}
+                  popupRef={modelAnchor.popupRef}
+                  className="w-[340px] max-h-[min(480px,70vh)] overflow-hidden rounded-2xl border border-white/[0.08] bg-[#242428] shadow-[0_18px_50px_-12px_rgba(0,0,0,0.75)]"
+                >
                     <div className="space-y-2 border-b border-white/[0.06] p-2.5">
                       <div className="flex items-center gap-2 rounded-xl bg-white/[0.04] px-2.5 py-2 text-[#71767b]">
                         <Search className="size-3.5 shrink-0" />
@@ -1185,6 +1386,28 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
                           />
                         </button>
                       </div>
+                      <div className="inline-flex rounded-full bg-white/[0.04] p-0.5 text-[11px]">
+                        <button
+                          type="button"
+                          onClick={() => setModelTab("installed")}
+                          className={cn(
+                            "rounded-full px-2.5 py-1 text-[#71767b]",
+                            modelTab === "installed" && "bg-white/[0.1] text-white",
+                          )}
+                        >
+                          Installed {installedCount}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setModelTab("available")}
+                          className={cn(
+                            "rounded-full px-2.5 py-1 text-[#71767b]",
+                            modelTab === "available" && "bg-white/[0.1] text-white",
+                          )}
+                        >
+                          Download {availableCount}
+                        </button>
+                      </div>
                     </div>
 
                     <div className="max-h-80 overflow-y-auto px-1.5 py-2">
@@ -1196,94 +1419,131 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
                           (lm) => lm.id === m.id || lm.name === m.label || lm.name === m.id,
                         );
                         const canPull = !m.installed && !m.cloud && !!m.pull && !!onPullModel;
+                        const busy = modelBusyId === m.id;
+                        const loadedMeta = loadedModels.find(
+                          (lm) => lm.id === m.id || lm.name === m.label || lm.name === m.id,
+                        );
+                        const withSize: PromptModelOption = {
+                          ...m,
+                          size_gb: m.size_gb ?? loadedMeta?.size_gb ?? null,
+                        };
                         return (
                           <div
                             key={m.id}
                             className={cn(
-                              "group flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left",
+                              "group flex w-full items-start gap-2 rounded-xl px-2.5 py-2 text-left",
                               active && "bg-white/[0.06]",
-                              downloaded && "hover:bg-white/[0.06]",
+                              "hover:bg-white/[0.06]",
                             )}
                           >
                             <button
                               type="button"
-                              disabled={canPull}
+                              disabled={canPull || busy}
                               onMouseDown={(e) => e.preventDefault()}
                               onClick={() => {
-                                if (canPull) return;
+                                if (canPull || busy) return;
                                 pickModel(m);
                               }}
-                              className="flex min-w-0 flex-1 items-center gap-2.5 text-left disabled:cursor-default"
+                              className="flex min-w-0 flex-1 items-start gap-2.5 text-left disabled:cursor-default"
                             >
-                              <ModelIcon model={m.label} className={cn(!downloaded && "opacity-60")} />
-                              <span className="min-w-0 flex-1 truncate text-sm">
-                                <span
-                                  className={cn(
-                                    "font-semibold",
-                                    downloaded ? "text-[#e7e9ea]" : "text-[#e7e9ea]/75",
+                              <ModelIcon
+                                model={m.label}
+                                className={cn("mt-0.5", !downloaded && "opacity-60")}
+                              />
+                              <span className="min-w-0 flex-1">
+                                <span className="flex flex-wrap items-center gap-1.5 text-sm">
+                                  <span
+                                    className={cn(
+                                      "font-semibold",
+                                      downloaded ? "text-[#e7e9ea]" : "text-[#e7e9ea]/75",
+                                    )}
+                                  >
+                                    {m.label}
+                                  </span>
+                                  <span className="text-[#71767b]">{level}</span>
+                                  {resident && (
+                                    <span className="text-[10px] uppercase tracking-wide text-emerald-400/90">
+                                      loaded
+                                    </span>
                                   )}
-                                >
-                                  {m.label}
-                                </span>{" "}
-                                <span className="text-[#71767b]">{level}</span>
-                                {resident && (
-                                  <span className="ml-1 text-[10px] uppercase tracking-wide text-emerald-400/90">
-                                    loaded
-                                  </span>
-                                )}
-                                {m.cloud && (
-                                  <span className="ml-1 text-[10px] uppercase tracking-wide text-sky-400/90">
-                                    cloud
-                                  </span>
-                                )}
-                                {canPull && (
-                                  <span className="ml-1 text-[10px] uppercase tracking-wide text-amber-400/90">
-                                    download
-                                  </span>
-                                )}
+                                  {m.cloud && (
+                                    <span className="text-[10px] uppercase tracking-wide text-sky-400/90">
+                                      cloud
+                                    </span>
+                                  )}
+                                </span>
+                                <ModelSpecs m={withSize} />
                               </span>
                             </button>
-                            {canPull && (
-                              <button
-                                type="button"
-                                title="Download model"
-                                aria-label={`Download ${m.label}`}
-                                onMouseDown={(e) => e.preventDefault()}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  onPullModel?.(m.id);
-                                }}
-                                className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-[#71767b] hover:bg-white/[0.08] hover:text-emerald-300"
-                              >
-                                <Download className="size-3.5" />
-                              </button>
-                            )}
-                            {downloaded && !m.cloud && resident && onUnloadModel && (
-                              <button
-                                type="button"
-                                title="Unload from memory"
-                                aria-label={`Unload ${m.label}`}
-                                onMouseDown={(e) => e.preventDefault()}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  onUnloadModel(m.id);
-                                }}
-                                className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-[#71767b] hover:bg-white/[0.08] hover:text-red-300"
-                              >
-                                <CircleMinus className="size-3.5" />
-                              </button>
-                            )}
+                            <div className="flex shrink-0 items-center gap-0.5 pt-0.5">
+                              {canPull && (
+                                <button
+                                  type="button"
+                                  title="Download"
+                                  aria-label={`Download ${m.label}`}
+                                  disabled={busy}
+                                  onMouseDown={(e) => e.preventDefault()}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    onPullModel?.(m.id);
+                                  }}
+                                  className="inline-flex h-7 items-center gap-1 rounded-md px-1.5 text-[11px] text-[#71767b] hover:bg-white/[0.08] hover:text-emerald-300 disabled:opacity-50"
+                                >
+                                  <Download className="size-3.5" />
+                                  {busy ? "…" : "Get"}
+                                </button>
+                              )}
+                              {downloaded && !m.cloud && resident && onUnloadModel && (
+                                <button
+                                  type="button"
+                                  title="Unload from memory"
+                                  aria-label={`Unload ${m.label}`}
+                                  disabled={busy}
+                                  onMouseDown={(e) => e.preventDefault()}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    onUnloadModel(m.id);
+                                  }}
+                                  className="inline-flex size-7 items-center justify-center rounded-md text-[#71767b] hover:bg-white/[0.08] hover:text-amber-300 disabled:opacity-50"
+                                >
+                                  <CircleMinus className="size-3.5" />
+                                </button>
+                              )}
+                              {downloaded && !m.cloud && onDeleteModel && (
+                                <button
+                                  type="button"
+                                  title="Uninstall from disk"
+                                  aria-label={`Uninstall ${m.label}`}
+                                  disabled={busy}
+                                  onMouseDown={(e) => e.preventDefault()}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    if (
+                                      confirm(
+                                        `Uninstall ${m.label}? This deletes the local model files.`,
+                                      )
+                                    ) {
+                                      onDeleteModel(m.id);
+                                    }
+                                  }}
+                                  className="inline-flex size-7 items-center justify-center rounded-md text-[#71767b] hover:bg-white/[0.08] hover:text-red-300 disabled:opacity-50"
+                                >
+                                  <Trash2 className="size-3.5" />
+                                </button>
+                              )}
+                            </div>
                           </div>
                         );
                       })}
                       {filteredModels.length === 0 && (
                         <div className="px-3 py-4 text-center text-xs text-[#71767b]">
-                          No matching models
+                          {modelTab === "installed"
+                            ? "No installed models yet — switch to Download."
+                            : "No matching downloads"}
                         </div>
                       )}
                     </div>
-                  </div>
-                )}
+                </PopupPortal>
               </div>
 
               <div className="ml-auto flex items-center gap-1.5">

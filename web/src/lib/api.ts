@@ -306,6 +306,27 @@ export async function pullLlmModel(model: string): Promise<{
   }
 }
 
+export async function deleteLlmModel(model: string): Promise<{
+  ok: boolean;
+  deleted?: string;
+  error?: string;
+}> {
+  try {
+    const r = await apiFetch("/api/models/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok && data?.ok !== true) {
+      return { ok: false, error: data?.error || `Uninstall failed (${r.status})` };
+    }
+    return data;
+  } catch (e: any) {
+    return { ok: false, error: e?.message || "Network error uninstalling model" };
+  }
+}
+
 // ── Image analysis / img2img / image→3D ─────────────────────────────────
 
 /**

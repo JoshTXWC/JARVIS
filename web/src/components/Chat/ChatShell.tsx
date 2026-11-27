@@ -1,6 +1,5 @@
 /**
- * ChatGPT-style main stage — chat thread + composer.
- * Floating Chat/Settings tiles come from the side dock.
+ * ChatGPT-style main stage — unused by the HUD App (kept for optional embeds).
  */
 import ChatPanel from "./ChatPanel";
 import CommandBar from "./CommandBar";
@@ -17,7 +16,6 @@ export default function ChatShell() {
 
   return (
     <div className="relative z-10 flex h-full w-full overflow-hidden bg-[var(--background)] pl-[68px]">
-      {/* ChatGPT-like secondary sidebar */}
       <aside className="hidden sm:flex w-[260px] shrink-0 flex-col border-r border-[var(--border)] bg-[var(--surface)]">
         <div className="p-3">
           <Button
@@ -61,7 +59,6 @@ export default function ChatShell() {
         </div>
       </aside>
 
-      {/* Main ChatGPT column */}
       <main className="flex min-w-0 flex-1 flex-col bg-[var(--background)]">
         <div className="flex-1 min-h-0">
           <ChatPanel embedded />
@@ -99,8 +96,8 @@ function SidebarRow({
 
 function PlusIcon() {
   return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-      <path d="M12 5v14M5 12h14" />
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <path d="M12 5v14M5 12h14" strokeLinecap="round" />
     </svg>
   );
 }

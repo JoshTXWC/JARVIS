@@ -80,8 +80,16 @@ def _openai_compat_payload(
     if not _is_google_openai_endpoint(endpoint):
         payload["frequency_penalty"] = frequency_penalty
         payload["presence_penalty"] = presence_penalty
-    if reasoning_effort not in (None, "none", ""):
-        payload["reasoning_effort"] = reasoning_effort
+    effort = (reasoning_effort or "").strip().lower().replace(" ", "_").replace("-", "_")
+    if effort in ("", "none"):
+        effort = ""
+    elif effort in ("very_high", "veryhigh", "extra_high", "max"):
+        # llama.cpp / some routers accept xhigh; OpenAI-compat falls back to high.
+        effort = "xhigh" if not _is_google_openai_endpoint(endpoint) else "high"
+    elif effort == "xhigh" and _is_google_openai_endpoint(endpoint):
+        effort = "high"
+    if effort:
+        payload["reasoning_effort"] = effort
     if tool_schemas:
         payload["tools"] = [{"type": "function", "function": s} for s in tool_schemas]
     # OpenAI / llama.cpp / newer Ollama: usage on the final SSE chunk.

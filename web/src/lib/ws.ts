@@ -379,6 +379,25 @@ class JarvisWS {
           } else {
             st.setBarehandsOpen(false);
           }
+        } else if (m.action === "open_window" || m.action === "open_media") {
+          const kind = (m.kind || "page") as any;
+          const items = Array.isArray(m.items)
+            ? m.items
+            : m.url
+              ? [{ url: m.url, title: m.title || m.url, thumbnail: m.thumbnail }]
+              : [];
+          if (items.length) {
+            st.pushMedia({
+              id: nextId(),
+              kind,
+              items,
+              summary: m.summary || m.title || "Opened",
+              tool: m.tool,
+              query: m.query,
+              ts: Date.now(),
+              expanded: kind === "page" || kind === "video" || kind === "videos" ? 0 : null,
+            });
+          }
         }
         break;
       }

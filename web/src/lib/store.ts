@@ -654,7 +654,7 @@ export const useStore = create<StoreState>()(persist((set) => ({
   // (orb, audio levels, mic flags, transient overlays, attachments) lives
   // in memory only so refresh starts clean.
   name: "jarvis.store.v1",
-  version: 4,
+  version: 6,
   storage: createJSONStorage(() => localStorage),
   migrate: (persisted, version) => {
     const p = (persisted || {}) as Record<string, unknown>;

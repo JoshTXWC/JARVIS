@@ -1,12 +1,12 @@
 import { lazy, Suspense, useEffect, useRef } from "react";
 import BootSequence from "./components/Boot/BootSequence";
-import CommandBar from "./components/Chat/CommandBar";
 import DropZone from "./components/Chat/DropZone";
 import BarehandsOverlay from "./components/HUD/BarehandsOverlay";
 import CanvasTiles from "./components/HUD/CanvasTiles";
 import GestureOverlay from "./components/HUD/GestureOverlay";
 import CommandPalette from "./components/HUD/CommandPalette";
 import IconDock from "./components/HUD/IconDock";
+import MediaWindows from "./components/HUD/MediaWindows";
 import Reticle from "./components/HUD/Reticle";
 import ConfirmModal from "./components/Tools/ConfirmModal";
 import Orb from "./components/Orb/Orb";
@@ -155,9 +155,8 @@ export default function App() {
     if (total > prev && hiddenRef.current) {
       (window as any).jarvis?.send?.("jarvis:show");
     }
-    if (total > prev) undockPanel("chat");
     lastMediaLenRef.current = total;
-  }, [media, undockPanel]);
+  }, [media]);
 
   useEffect(() => {
     let lastLen = 0;
@@ -204,11 +203,9 @@ export default function App() {
     <div className="relative w-screen h-screen overflow-hidden cc-root bg-background">
       <Orb variant="fullscreen" />
 
-      {/* Composer under the orb only while the chat tile is docked */}
-      <OrbComposerFallback />
-
       <IconDock />
       <CanvasTiles />
+      <MediaWindows />
 
       <Reticle />
       <Suspense fallback={null}>
@@ -221,19 +218,6 @@ export default function App() {
       <BootSequence />
       <BarehandsOverlay />
       <GestureOverlay />
-    </div>
-  );
-}
-
-/** Under-orb PromptInput only when the chat tile is put away. */
-function OrbComposerFallback() {
-  const chatDocked = useStore((s) => s.dockedPanels.includes("chat"));
-  if (!chatDocked) return null;
-  return (
-    <div className="pointer-events-none absolute inset-x-0 bottom-[12%] z-20 flex justify-center px-4">
-      <div className="pointer-events-auto w-full max-w-xl rounded-2xl border border-white/12 bg-[rgba(22,24,28,0.4)] p-3 shadow-lg backdrop-blur-[32px]">
-        <CommandBar embedded />
-      </div>
     </div>
   );
 }

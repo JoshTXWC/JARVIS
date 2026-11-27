@@ -52,14 +52,53 @@ def register(registry):
     @tool(
         name="browser_open",
         description=(
-            "LAST-RESORT navigation — opens a visible external Chromium "
-            "window. Only use when the user EXPLICITLY says 'open browser' "
-            "or 'open in browser' AND provides a concrete URL. "
-            "Do NOT use for general information retrieval, news, research, "
-            "search, images, or videos — those MUST go through `web_search` "
-            "/ `image_search` / `video_search` so results render inside the "
-            "JARVIS Media Bay. For inline embedding (no popup), use "
-            "`open_inline`."
+            "Open a URL inside a JARVIS floating browser window on the HUD "
+            "(not an external Chrome popup). Use when the user says 'open', "
+            "'pull up', 'show me', or 'browse' a site / web app. "
+            "For search/images/videos prefer web_search / image_search / "
+            "video_search. Use browser_external only if they insist on a "
+            "separate Chromium window."
+        ),
+        permission=Permission.SAFE,
+        parameters={
+            "type": "object",
+            "properties": {
+                "url": {"type": "string"},
+                "title": {"type": "string"},
+            },
+            "required": ["url"],
+        },
+        preview=lambda a: f"open in JARVIS -> {a.get('url','')}",
+    )
+    async def browser_open(url: str, title: str = "") -> str:
+        from .web_tools import MEDIA_PREFIX
+        import json
+
+        target = _normalise_url(url)
+        host = ""
+        try:
+            from urllib.parse import urlparse
+            host = urlparse(target).hostname or ""
+        except Exception:  # noqa: BLE001
+            pass
+        item = {
+            "url": target,
+            "title": title or host or target,
+            "thumbnail": f"https://www.google.com/s2/favicons?domain={host}&sz=64" if host else "",
+        }
+        payload = {
+            "kind": "page",
+            "items": [item],
+            "summary": f"Opened in JARVIS: {item['title']}",
+        }
+        return MEDIA_PREFIX + json.dumps(payload, ensure_ascii=False)
+
+    @tool(
+        name="browser_external",
+        description=(
+            "Open a URL in a separate external Chromium window (outside the "
+            "JARVIS HUD). Only when the user explicitly asks for an external "
+            "or system browser."
         ),
         permission=Permission.SAFE,
         parameters={
@@ -69,7 +108,7 @@ def register(registry):
         },
         preview=lambda a: f"open external browser -> {a.get('url','')}",
     )
-    async def browser_open(url: str) -> str:
+    async def browser_external(url: str) -> str:
         page = await controller.page()
         target = _normalise_url(url)
         await page.goto(target, wait_until="domcontentloaded", timeout=30_000)

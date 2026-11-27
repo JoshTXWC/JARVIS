@@ -138,9 +138,9 @@ def register(registry):
     @tool(
         name="open_inline",
         description=(
-            "Embed a web page directly inside the Media Bay iframe — never opens a "
-            "real browser window. Pass an absolute URL. Use whenever the user says "
-            "'open / show me / pull up <site>'."
+            "Open a web page or web app in a floating JARVIS window (iframe). "
+            "Never opens a real external browser. Use whenever the user says "
+            "'open / show me / pull up <site or app>'."
         ),
         permission=Permission.SAFE,
         parameters={
@@ -151,7 +151,7 @@ def register(registry):
             },
             "required": ["url"],
         },
-        preview=lambda a: f"embed inline: {a.get('url','')}",
+        preview=lambda a: f"open window: {a.get('url','')}",
     )
     async def open_inline(url: str, title: str = "") -> str:
         u = url.strip()
@@ -162,7 +162,52 @@ def register(registry):
             "title": title or _host(u),
             "thumbnail": _favicon(u),
         }
-        return _media("page", [item], f"Embedded: {item['title']}")
+        return _media("page", [item], f"Opened: {item['title']}")
+
+    @tool(
+        name="app_window",
+        description=(
+            "Open a common web app inside a floating JARVIS window. "
+            "Known apps: gmail, calendar, drive, maps, youtube, github, "
+            "notion, chatgpt, twitter/x, reddit — or pass any https URL. "
+            "Use when the user asks to open an app inside JARVIS."
+        ),
+        permission=Permission.SAFE,
+        parameters={
+            "type": "object",
+            "properties": {
+                "app": {"type": "string", "description": "App name or URL"},
+                "title": {"type": "string"},
+            },
+            "required": ["app"],
+        },
+        preview=lambda a: f"app window: {a.get('app','')}",
+    )
+    async def app_window(app: str, title: str = "") -> str:
+        key = (app or "").strip().lower()
+        catalog = {
+            "gmail": "https://mail.google.com",
+            "calendar": "https://calendar.google.com",
+            "drive": "https://drive.google.com",
+            "maps": "https://maps.google.com",
+            "youtube": "https://www.youtube.com",
+            "github": "https://github.com",
+            "notion": "https://www.notion.so",
+            "chatgpt": "https://chatgpt.com",
+            "twitter": "https://x.com",
+            "x": "https://x.com",
+            "reddit": "https://www.reddit.com",
+        }
+        if key in catalog:
+            u = catalog[key]
+            label = title or key.title()
+        else:
+            u = app.strip()
+            if not u.startswith(("http://", "https://")):
+                u = "https://" + u
+            label = title or _host(u)
+        item = {"url": u, "title": label, "thumbnail": _favicon(u)}
+        return _media("page", [item], f"App window: {label}")
 
     @tool(
         name="media_show",

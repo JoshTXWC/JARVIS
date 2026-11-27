@@ -752,7 +752,27 @@ async def select_image_model_endpoint(request: Request, body: ImageModelSelectBo
         return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
 
 
-REASONING_LEVELS = ("none", "low", "medium", "high")
+REASONING_LEVELS = ("none", "low", "medium", "high", "very_high")
+# Wire UI labels → API effort strings (OpenAI / llama.cpp / xAI).
+REASONING_API_MAP = {
+    "none": None,
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "very_high": "xhigh",
+}
+
+
+def _normalize_reasoning_effort(raw: str | None) -> str:
+    effort = (raw or "none").lower().strip().replace(" ", "_").replace("-", "_") or "none"
+    aliases = {
+        "xhigh": "very_high",
+        "extra_high": "very_high",
+        "veryhigh": "very_high",
+        "max": "very_high",
+    }
+    effort = aliases.get(effort, effort)
+    return effort if effort in REASONING_LEVELS else "none"
 
 
 @router.get("/models")
@@ -790,13 +810,13 @@ async def list_llm_models(request: Request):
         gpu_vendor=gpu.get("vendor"),
         shared_memory=bool(gpu.get("shared_memory")),
     )
-    effort = (getattr(cfg.model, "reasoning_effort", None) or "none").lower().strip() or "none"
+    effort = _normalize_reasoning_effort(getattr(cfg.model, "reasoning_effort", None))
     payload.update({
         "provider": cfg.model.provider,
         "endpoint": cfg.model.endpoint,
         "installed": installed,
-        "reasoning_effort": effort if effort in REASONING_LEVELS else "none",
-        "reasoning_levels": list(REASONING_LEVELS),
+        "reasoning_effort": effort,
+        "reasoning_levels": [lvl for lvl in REASONING_LEVELS if lvl != "none"] + ["none"],
     })
     return payload
 
@@ -859,7 +879,7 @@ async def list_loaded_models(request: Request):
     available: list[dict] = []
     source = "none"
     context_length = None
-    effort = (getattr(cfg.model, "reasoning_effort", None) or "none").lower().strip() or "none"
+    effort = _normalize_reasoning_effort(getattr(cfg.model, "reasoning_effort", None))
 
     # Ollama runners
     ollama = _ollama_native_base(cfg)
@@ -995,8 +1015,8 @@ async def list_loaded_models(request: Request):
         "context_length": context_length,
         "selected": cfg.model.model,
         "endpoint": cfg.model.endpoint,
-        "reasoning_effort": effort if effort in REASONING_LEVELS else "none",
-        "reasoning_levels": list(REASONING_LEVELS),
+        "reasoning_effort": effort,
+        "reasoning_levels": [lvl for lvl in REASONING_LEVELS if lvl != "none"] + ["none"],
     }
 
 
@@ -1122,24 +1142,37 @@ async def load_llm_model(request: Request, body: LlmModelLoadBody):
 
 @router.post("/models/reasoning")
 async def set_reasoning_effort(request: Request, body: LlmReasoningBody):
-    """Set chat reasoning_effort (none/low/medium/high) for llama.cpp / OpenAI-compat."""
+    """Set chat reasoning_effort (none/low/medium/high/very_high) for llama.cpp / OpenAI-compat."""
     cfg = request.app.state.cfg
-    effort = (body.effort or "").strip().lower()
+    effort = (body.effort or "").strip().lower().replace(" ", "_").replace("-", "_")
+    aliases = {
+        "xhigh": "very_high",
+        "extra_high": "very_high",
+        "veryhigh": "very_high",
+        "max": "very_high",
+    }
+    effort = aliases.get(effort, effort)
     if effort not in REASONING_LEVELS:
         return JSONResponse(
             {"ok": False, "error": f"effort must be one of {', '.join(REASONING_LEVELS)}"},
             status_code=400,
         )
+    # Persist the UI id; brain maps to the provider wire value at request time.
     cfg.model.reasoning_effort = None if effort == "none" else effort
-    persisted = _persist_model_field("reasoning_effort", effort)
+    persisted = _persist_model_field("reasoning_effort", effort if effort != "none" else "none")
     return {
         "ok": True,
         "reasoning_effort": effort,
+        "api_effort": REASONING_API_MAP.get(effort),
         "persisted": persisted,
     }
 
 
 class LlmModelPullBody(BaseModel):
+    model: str
+
+
+class LlmModelDeleteBody(BaseModel):
     model: str
 
 
@@ -1180,6 +1213,45 @@ async def pull_llm_model(request: Request, body: LlmModelPullBody):
                 status_code=400,
             )
         return {"ok": True, "pulled": name, "log": out.strip()[-500:]}
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
+
+@router.post("/models/delete")
+async def delete_llm_model(request: Request, body: LlmModelDeleteBody):
+    """Uninstall a local Ollama model (`ollama rm`)."""
+    import asyncio
+    import shutil
+
+    name = (body.model or "").strip()
+    if not name:
+        return JSONResponse({"ok": False, "error": "model required"}, status_code=400)
+    if name.lower() in {"auto", "smart auto"}:
+        return JSONResponse({"ok": False, "error": "cannot uninstall auto"}, status_code=400)
+
+    ollama_bin = shutil.which("ollama")
+    if not ollama_bin:
+        return JSONResponse(
+            {"ok": False, "error": "ollama CLI not found on PATH"},
+            status_code=400,
+        )
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            ollama_bin,
+            "rm",
+            name,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        out_b, _ = await proc.communicate()
+        out = (out_b or b"").decode("utf-8", "replace")[-2000:]
+        if proc.returncode != 0:
+            return JSONResponse(
+                {"ok": False, "error": out.strip() or f"ollama rm failed ({proc.returncode})"},
+                status_code=400,
+            )
+        return {"ok": True, "deleted": name, "log": out.strip()[-500:]}
     except Exception as e:  # noqa: BLE001
         return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
 

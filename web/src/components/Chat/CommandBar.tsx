@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useStore, nextId, type ChatAttachment } from "../../lib/store";
 import { wsClient } from "../../lib/ws";
 import {
+  deleteLlmModel,
   getHealth,
   getLlmModels,
   getLoadedLlmModels,
@@ -39,7 +40,13 @@ export default function CommandBar({
   const [modelBusy, setModelBusy] = useState(false);
   const [modelError, setModelError] = useState<string | null>(null);
   const [loadedModels, setLoadedModels] = useState<LoadedLlmModel[]>([]);
-  const [reasoningEffort, setReasoning] = useState("none");
+  const [reasoningEffort, setReasoning] = useState("medium");
+  const [reasoningLevels, setReasoningLevels] = useState<string[]>([
+    "low",
+    "medium",
+    "high",
+    "very_high",
+  ]);
   const [loadBusy, setLoadBusy] = useState<string | null>(null);
 
   const pushChat = useStore((s) => s.pushChat);
@@ -86,6 +93,11 @@ export default function CommandBar({
         installed: m.installed,
         summary: m.summary,
         pull: m.pull,
+        vram_gb: m.vram_gb,
+        ram_gb: m.ram_gb,
+        fit: m.fit,
+        fit_label: m.fit_label,
+        needs: m.needs,
       })),
     [models],
   );
@@ -97,6 +109,10 @@ export default function CommandBar({
         setSelectedModel(j.selected || "");
         setAutoModel(Boolean(j.auto) || (j.selected || "") === "auto");
         if (j.reasoning_effort) setReasoning(String(j.reasoning_effort));
+        if (j.reasoning_levels?.length) {
+          const order = ["low", "medium", "high", "very_high", "none"];
+          setReasoningLevels(order.filter((lvl) => j.reasoning_levels!.includes(lvl)));
+        }
       })
       .catch(() => undefined);
   };
@@ -106,6 +122,10 @@ export default function CommandBar({
       .then((j) => {
         setLoadedModels(j.loaded || []);
         if (j.reasoning_effort) setReasoning(j.reasoning_effort);
+        if (j.reasoning_levels?.length) {
+          const order = ["low", "medium", "high", "very_high", "none"];
+          setReasoningLevels(order.filter((lvl) => j.reasoning_levels!.includes(lvl)));
+        }
         if (j.context_length) setContextMeter(contextUsed, j.context_length);
       })
       .catch(() => undefined);
@@ -120,6 +140,10 @@ export default function CommandBar({
         setSelectedModel(j.selected || "");
         setAutoModel(Boolean(j.auto) || (j.selected || "") === "auto");
         if (j.reasoning_effort) setReasoning(String(j.reasoning_effort));
+        if (j.reasoning_levels?.length) {
+          const order = ["low", "medium", "high", "very_high", "none"];
+          setReasoningLevels(order.filter((lvl) => j.reasoning_levels!.includes(lvl)));
+        }
       })
       .catch(() => undefined);
     getTools()
@@ -331,6 +355,8 @@ export default function CommandBar({
           loadedModels={loadedModels}
           onRefreshLoaded={refreshLoaded}
           reasoningEffort={reasoningEffort}
+          reasoningLevels={reasoningLevels}
+          modelBusyId={loadBusy}
           onReasoningEffortChange={(effort) => {
             setReasoning(effort);
             void setReasoningEffort(effort).then((res) => {
@@ -363,6 +389,20 @@ export default function CommandBar({
               .then((res) => {
                 if (!res.ok) {
                   setModelError(res.error || "Download failed");
+                  return;
+                }
+                refreshCatalog();
+                refreshLoaded();
+              })
+              .finally(() => setLoadBusy(null));
+          }}
+          onDeleteModel={(id) => {
+            setLoadBusy(id);
+            setModelError(null);
+            void deleteLlmModel(id)
+              .then((res) => {
+                if (!res.ok) {
+                  setModelError(res.error || "Uninstall failed");
                   return;
                 }
                 refreshCatalog();

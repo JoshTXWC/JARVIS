@@ -160,7 +160,7 @@ model:
   max_tokens: 4096
   request_timeout_seconds: 300
   native_tool_calls: true
-  reasoning_effort: low
+  reasoning_effort: medium
 
 image_model:
   # Selectable in the JARVIS command bar. Options:

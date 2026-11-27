@@ -42,6 +42,7 @@ export default function CanvasTiles() {
           minW={320}
           minH={280}
           z={50 + i}
+          overflowVisible={id === "chat"}
         >
           <WidgetWindow id={id} />
         </Floating>
@@ -54,7 +55,8 @@ function WidgetWindow({ id }: { id: DockableId }) {
   return (
     <div
       className={cn(
-        "glass-tile flex h-full min-h-0 flex-col overflow-hidden rounded-xl",
+        "glass-tile flex h-full min-h-0 flex-col rounded-xl",
+        id === "chat" ? "overflow-visible" : "overflow-hidden",
         "border border-white/12",
         "shadow-[0_16px_48px_-16px_rgba(0,0,0,0.45),inset_0_1px_0_0_rgba(255,255,255,0.08)]",
       )}
@@ -66,13 +68,18 @@ function WidgetWindow({ id }: { id: DockableId }) {
         <h3 className="text-sm font-semibold text-foreground/95">{DOCK_META[id].title}</h3>
       </div>
 
-      <div className="relative min-h-0 flex-1 overflow-hidden flex flex-col bg-transparent">
+      <div
+        className={cn(
+          "relative min-h-0 flex-1 flex flex-col bg-transparent",
+          id === "chat" ? "overflow-visible" : "overflow-hidden",
+        )}
+      >
         {id === "chat" ? (
           <>
             <div className="min-h-0 flex-1 overflow-hidden">
               <ChatPanel embedded />
             </div>
-            <div className="shrink-0 border-t border-white/10 bg-black/25 px-3 py-3 backdrop-blur-xl">
+            <div className="shrink-0 overflow-visible border-t border-white/10 bg-black/25 px-3 py-3 backdrop-blur-xl">
               <CommandBar embedded compactStatus />
             </div>
           </>

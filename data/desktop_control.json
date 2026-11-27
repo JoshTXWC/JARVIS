@@ -1,6 +1,6 @@
 {
   "enabled": false,
-  "mode": "hud",
+  "mode": "precision",
   "overlay_enabled": true,
   "viz_mode": "skeleton",
   "overlay_opacity": 0.85,

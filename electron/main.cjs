@@ -31,6 +31,8 @@ const TRAY_ICON_FALLBACK_SVG = path.resolve(PROJECT_ROOT, "web", "public", "favi
 
 const FULL_W = 1600;
 const FULL_H = 1000;
+const CHAT_W = 960;
+const CHAT_H = 720;
 
 let mainWindow = null;
 let overlayWindow = null;
@@ -42,6 +44,8 @@ let handsPowerBlockerId = null;
 let injectProc = null;
 let injectArmed = false;
 let injectBuf = "";
+/** "hud" = fullscreen orb background · "chat" = compact chat-only window */
+let windowMode = "hud";
 
 // ── backend lifecycle ─────────────────────────────────────────────────────
 
@@ -113,11 +117,45 @@ function pickTrayIcon() {
   return nativeImage.createEmpty();
 }
 
+function applyWindowMode(mode) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const next = mode === "chat" ? "chat" : "hud";
+  windowMode = next;
+  try {
+    if (next === "chat") {
+      if (mainWindow.isFullScreen()) mainWindow.setFullScreen(false);
+      if (mainWindow.isMaximized()) mainWindow.unmaximize();
+      const bounds = centeredOnPrimary(CHAT_W, CHAT_H);
+      // Chat-only can be smaller than the HUD minimum.
+      try { mainWindow.setMinimumSize(720, 520); } catch { /* noop */ }
+      mainWindow.setBounds(bounds, false);
+      saveStoredBounds({ chat: bounds, mode: "chat" });
+    } else {
+      try { mainWindow.setMinimumSize(1024, 700); } catch { /* noop */ }
+      const display = screen.getPrimaryDisplay();
+      mainWindow.setBounds({
+        x: display.bounds.x,
+        y: display.bounds.y,
+        width: display.workAreaSize.width,
+        height: display.workAreaSize.height,
+      }, false);
+      if (!mainWindow.isFullScreen()) mainWindow.setFullScreen(true);
+      saveStoredBounds({ mode: "hud" });
+    }
+  } catch (e) {
+    console.warn("[electron] applyWindowMode failed", e);
+  }
+}
+
 function showWindow() {
   if (!mainWindow) return;
   if (mainWindow.isMinimized()) mainWindow.restore();
   try {
-    if (!mainWindow.isFullScreen()) mainWindow.setFullScreen(true);
+    if (windowMode === "hud") {
+      if (!mainWindow.isFullScreen()) mainWindow.setFullScreen(true);
+    } else if (mainWindow.isFullScreen()) {
+      mainWindow.setFullScreen(false);
+    }
   } catch { /* noop */ }
   mainWindow.show();
   mainWindow.focus();
@@ -265,10 +303,10 @@ function persistCurrentBounds() {
 }
 
 /** Center a sized window on the primary work area. */
-function centeredOnPrimary(width = FULL_W, height = FULL_H) {
+function centeredOnPrimary(width = FULL_W, height = FULL_H, minW = 720, minH = 520) {
   const a = screen.getPrimaryDisplay().workArea;
-  const w = Math.min(Math.max(width, 1024), a.width);
-  const h = Math.min(Math.max(height, 700), a.height);
+  const w = Math.min(Math.max(width, minW), a.width);
+  const h = Math.min(Math.max(height, minH), a.height);
   return {
     width: w,
     height: h,
@@ -391,10 +429,12 @@ function createWindow() {
     mainWindow.focus();
   });
 
-  // Stay borderless fullscreen whenever shown.
+  // Stay fullscreen in HUD mode; chat mode stays a compact window.
   mainWindow.on("show", () => {
     try {
-      if (!mainWindow.isFullScreen()) mainWindow.setFullScreen(true);
+      if (windowMode === "hud" && !mainWindow.isFullScreen()) {
+        mainWindow.setFullScreen(true);
+      }
     } catch { /* noop */ }
   });
 
@@ -664,6 +704,11 @@ function sendInjectOp(op) {
 }
 
 function installIpc() {
+  ipcMain.on("jarvis:set-window-mode", (_e, payload) => {
+    const mode = payload?.mode === "chat" ? "chat" : "hud";
+    applyWindowMode(mode);
+    showWindow();
+  });
   ipcMain.on("jarvis:wake", () => {
     // Renderer detected the wake word — bring the HUD forward.
     showWindow();
