@@ -52,6 +52,12 @@ def is_under(path: Path, roots: list[Path]) -> bool:
     return False
 
 
+def _outside_msg(p: Path, roots: list[Path]) -> str:
+    shown = ", ".join(str(r) for r in roots[:4])
+    return (f"path outside allowed roots: {p}. Allowed: {shown}. "
+            "Use a path inside one of these (e.g. '.' for the project folder).")
+
+
 def assert_readable(path: str, project_root: Path, *, allow_home: bool = True) -> Path:
     """Resolve and ensure path is under project (or home if allowed)."""
     p = expand(path)
@@ -65,7 +71,7 @@ def assert_readable(path: str, project_root: Path, *, allow_home: bool = True) -
     if name.endswith(".pem") or name.endswith(".key") or name == "authorized_keys":
         raise PathDenied(f"access denied to credential material: {p.name}")
     if not is_under(p, roots):
-        raise PathDenied(f"path outside allowed roots: {p}")
+        raise PathDenied(_outside_msg(p, roots))
     return p
 
 

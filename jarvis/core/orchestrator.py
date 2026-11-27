@@ -280,7 +280,8 @@ class Orchestrator:
             f"model={self.cfg.model.model}; "
             f"image_model={getattr(getattr(self.cfg, 'image_model', None), 'selected', 'flux2-klein')}; "
             f"tools={len(self.registry.all_tools())}; "
-            f"permission_mode={self.cfg.permissions.mode}."
+            f"permission_mode={self.cfg.permissions.mode}; "
+            f"project_folder={self.cfg.project_root} (relative paths resolve here, '.' = this folder)."
         )
         persona = "\n\n".join([persona, runtime])
         if self._active_agent and self._active_agent.system_prompt:
@@ -309,6 +310,15 @@ class Orchestrator:
             persona = "\n\n".join([persona, mem_block])
         if self._file_context:
             persona = "\n\n".join([persona, self._file_context])
+        # Local clock last (minute granularity) so the stable prefix above stays
+        # cache-friendly; small models otherwise invent the date/time.
+        import datetime as _dt
+        import platform as _pf
+        now = _dt.datetime.now().astimezone()
+        persona = "\n\n".join([persona, (
+            f"Local date/time: {now.strftime('%A %d %B %Y, %H:%M')} "
+            f"({now.tzname() or 'local'}); OS: {_pf.system()} {_pf.release()}."
+        )])
         names = self._turn_tool_names()
         if lean and self.cfg.model.native_tool_calls:
             # Native tool schemas already carry names + descriptions; a second

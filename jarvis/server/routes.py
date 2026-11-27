@@ -45,6 +45,11 @@ def _extract_session(request: Request) -> str | None:
     )
 
 
+def _is_local_endpoint(url: str) -> bool:
+    from ..core.tool_select import is_local_endpoint
+    return is_local_endpoint(url or "")
+
+
 async def require_session(request: Request) -> None:
     """FastAPI dependency — privileged API routes."""
     from ..core.session_auth import get_session_auth
@@ -553,7 +558,8 @@ async def health(request: Request):
             "provider": cfg.model.provider,
             "model": cfg.model.model,
             "endpoint": cfg.model.endpoint,
-            "configured": bool(cfg.model.api_key),
+            # Local endpoints (Ollama/LM Studio) need no key to be "configured".
+            "configured": bool(cfg.model.api_key) or _is_local_endpoint(cfg.model.endpoint),
         },
         "image_model": getattr(getattr(cfg, "image_model", None), "selected", "flux2-klein"),
         "plugins": [p.name for p in registry.plugins()],
