@@ -286,6 +286,8 @@ plugins:
   voice_tools_optional:  { enabled: true }
   vision_tools_optional: { enabled: true }
   barehands_tools:       { enabled: true }
+  coding_tools:          { enabled: true }   # code_search, read_code, edit_file, git_status, git_commit_push
+  github_tools:          { enabled: true }   # needs GITHUB_TOKEN in .env for private repos / PRs
   calendar_optional:     { enabled: false }
   email_optional:        { enabled: false }
   smart_home_optional:   { enabled: false }
@@ -313,6 +315,14 @@ agents:
   memory:   { enabled: true }
   vision:   { enabled: true }
   voice:    { enabled: true }
+
+# Coding mode ("/agent code" or the command palette → Coding mode).
+# github_clone puts repos in workspace_dir; JARVIS may write there and in
+# its own folder (plus any extra_write_roots). Token: GITHUB_TOKEN in .env.
+coding:
+  workspace_dir: "~/JARVIS-Projects"
+  extra_write_roots: []
+  github_token_env: GITHUB_TOKEN
 
 mission:
   enabled: false

@@ -98,6 +98,8 @@ class Orchestrator:
         # Plan for the current complex task (autonomous planning). Set per
         # turn, injected into the system prompt to anchor multi-step execution.
         self._current_plan: str = ""
+        # Files the user referenced this turn, pre-read for grounding.
+        self._file_context: str = ""
         self._history: list[dict] = []
         self._active_agent: Agent | None = None
         # Name of the tool currently running, or None when idle. Used by the
@@ -139,6 +141,15 @@ class Orchestrator:
         return [Event(EventKind.UI, text=payload.get("action", "ui"), payload=payload)]
 
     # ------------------------------------------------------------------
+    def _referenced_files_block(self, user_text: str) -> str:
+        from .file_refs import referenced_files_block
+        try:
+            budget = 6000 if self._lean() else 20000
+            return referenced_files_block(user_text, self.cfg, budget_chars=budget)
+        except Exception:  # noqa: BLE001
+            log.exception("file reference grounding failed")
+            return ""
+
     def _trim_history_for_overflow(self, keep: int = 6) -> int:
         """Keep only the tail of the conversation, starting at a real user turn."""
         if len(self._history) <= keep:
@@ -282,6 +293,8 @@ class Orchestrator:
         mem_block = self._recalled_block()
         if mem_block:
             persona = "\n\n".join([persona, mem_block])
+        if self._file_context:
+            persona = "\n\n".join([persona, self._file_context])
         names = self._turn_tool_names()
         if lean and self.cfg.model.native_tool_calls:
             # Native tool schemas already carry names + descriptions; a second
@@ -722,6 +735,10 @@ class Orchestrator:
         # Recall relevant long-term memory for the reasoning path only — the
         # immediate/intent paths above never touch the LLM prompt.
         self._recalled = await self._recall_for(user_text)
+
+        # Ground the turn in any files the user named (small local models
+        # often answer from imagination instead of calling read tools).
+        self._file_context = self._referenced_files_block(user_text)
 
         # Autonomous planning: for a complex request, draft a plan first and
         # surface it to the UI. The plan is injected into the system prompt so

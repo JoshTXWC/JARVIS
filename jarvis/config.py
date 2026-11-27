@@ -121,6 +121,16 @@ class AssistantConfig(BaseModel):
     persona_compact: str = ""
 
 
+class CodingConfig(BaseModel):
+    """Coding mode + GitHub. Repos cloned by `github_clone` land in
+    workspace_dir, which (with extra_write_roots) is writable by file/shell/
+    edit tools in addition to the JARVIS folder. Token: GITHUB_TOKEN in .env."""
+    workspace_dir: str = "~/JARVIS-Projects"
+    extra_write_roots: list[str] = Field(default_factory=list)
+    github_token_env: str = "GITHUB_TOKEN"
+    github_api: str = "https://api.github.com"
+
+
 class MissionConfig(BaseModel):
     enabled: bool = False
     project_path: str = ""
@@ -227,6 +237,7 @@ class Config(BaseModel):
     plugins: dict[str, PluginToggle] = Field(default_factory=dict)
     agents: dict[str, PluginToggle] = Field(default_factory=dict)
     mission: MissionConfig = Field(default_factory=MissionConfig)
+    coding: CodingConfig = Field(default_factory=CodingConfig)
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
     barehands: BarehandsConfig = Field(default_factory=BarehandsConfig)
     ultimate: UltimateConfig = Field(default_factory=UltimateConfig)
