@@ -13,10 +13,16 @@ where node >nul 2>&1
 if errorlevel 1 goto :no_node
 for /f "tokens=*" %%v in ('node --version 2^>^&1') do call :log "node %%v"
 
+if not exist "%ROOT%venv\Scripts\activate.bat" (
+  call :log "venv missing - running setup.bat first"
+  call "%ROOT%setup.bat"
+)
 if not exist "%ROOT%venv\Scripts\activate.bat" goto :no_venv
 call :log "venv OK"
 
 if not exist "%ROOT%electron\node_modules" goto :npm_install
+REM npm 12+ can skip Electron's postinstall (binary download) - repair it.
+if not exist "%ROOT%electron\node_modules\electron\dist\electron.exe" goto :npm_install
 goto :web_build_check
 
 :npm_install
@@ -28,6 +34,10 @@ echo.
 pushd "%ROOT%electron"
 call npm install >> "%LOG%" 2>&1
 set _ERR=!errorlevel!
+if !_ERR! == 0 if not exist "node_modules\electron\dist\electron.exe" (
+  call npm rebuild electron >> "%LOG%" 2>&1
+  set _ERR=!errorlevel!
+)
 popd
 if not !_ERR! == 0 goto :npm_failed
 call :log "npm install OK"

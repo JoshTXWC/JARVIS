@@ -253,9 +253,12 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                     await safe_send({"type": "error", "text": f"desktop_control: {e}"})
 
             elif mtype == "agent":
-                name = msg.get("name", "")
+                name = (msg.get("name") or "").strip()
                 agent = agents.get(name)
-                if agent:
+                if name.lower() in {"", "jarvis", "default", "base", "standard"}:
+                    orchestrator.set_agent(None)
+                    await safe_send({"type": "info", "text": "agent active: jarvis"})
+                elif agent:
                     orchestrator.set_agent(agent)
                     await safe_send({"type": "info", "text": f"agent active: {name}"})
                 else:

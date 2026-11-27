@@ -1,5 +1,5 @@
 /**
- * Tool sidebar — Chat + Settings. Click to undock; drop tiles here to store.
+ * Tool sidebar — Chat, Models, Health, Settings. Click to undock; drop tiles here to store.
  */
 import type { ReactNode } from "react";
 import { useStore } from "../../lib/store";
@@ -11,6 +11,12 @@ const ICONS: Record<DockableId, ReactNode> = {
   chat: (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
       <path d="M5 6h14a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H10l-4 3v-3H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2z" strokeLinejoin="round" />
+    </svg>
+  ),
+  models: (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75">
+      <path d="M12 3 4 7.5v9L12 21l8-4.5v-9L12 3z" strokeLinejoin="round" />
+      <path d="M4 7.5 12 12l8-4.5M12 12v9" strokeLinejoin="round" />
     </svg>
   ),
   health: (

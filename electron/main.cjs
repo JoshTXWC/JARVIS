@@ -42,6 +42,7 @@ let handsPowerBlockerId = null;
 let injectProc = null;
 let injectArmed = false;
 let injectBuf = "";
+let backendExitCode = null;   // set if the spawned backend dies before it's healthy
 
 // ── backend lifecycle ─────────────────────────────────────────────────────
 
@@ -60,6 +61,7 @@ async function waitForBackend(timeoutMs = 60000) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     if (await pingBackend()) return true;
+    if (backendExitCode !== null) return false;   // crashed on startup: fail fast
     await new Promise((r) => setTimeout(r, 500));
   }
   return false;
@@ -85,9 +87,11 @@ function startBackend() {
     backend.on("exit", (code) => {
       console.log("[electron] backend exited", code);
       backend = null;
+      backendExitCode = code === null ? -1 : code;
     });
     backend.on("error", (err) => {
       console.error("[electron] backend spawn error:", err);
+      backendExitCode = -1;
     });
   });
 }
@@ -451,8 +455,13 @@ async function loadApp() {
       `<html><body style="background:#03070f;color:#7dd3fc;font-family:system-ui;display:grid;place-items:center;height:100vh;margin:0;">
         <div style="text-align:center">
           <div style="font-size:14px;letter-spacing:0.4em;opacity:0.6">J.A.R.V.I.S.</div>
-          <div style="font-size:22px;margin-top:12px">backend not responding on ${BACKEND_URL}</div>
-          <div style="font-size:12px;margin-top:24px;opacity:0.55">start it manually: run.bat — then reload (Ctrl+R)</div>
+          <div style="font-size:22px;margin-top:12px">${backendExitCode !== null
+            ? `backend stopped during startup (exit code ${backendExitCode})`
+            : `backend not responding on ${BACKEND_URL}`}</div>
+          <div style="font-size:12px;margin-top:24px;opacity:0.7;line-height:1.8">
+            Details: run-app.log and data\\logs in the JARVIS folder.<br/>
+            Common fixes: re-run setup.bat &middot; close other JARVIS windows (port ${BACKEND_PORT}) &middot; run.bat to see errors live.<br/>
+            Then reload with Ctrl+R.</div>
         </div>
       </body></html>`
     )}`);

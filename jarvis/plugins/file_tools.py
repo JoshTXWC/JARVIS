@@ -19,7 +19,7 @@ def register(registry):
 
     @tool(
         name="list_dir",
-        description="List entries in a directory. Optional glob pattern + recursive flag.",
+        description="List entries in a directory. Use '.' for the JARVIS project folder, '~' for home; relative paths resolve from the project folder. Optional glob + recursive.",
         permission=Permission.SAFE,
         parameters={
             "type": "object",

@@ -46,6 +46,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def build_services(cfg_path: str | None):
     cfg = load_config(cfg_path)
     logger = setup_logging(cfg)
+    # Coding workspace (cloned repos) is writable alongside the project root.
+    from .core.path_guard import expand, set_extra_write_roots
+    _ws = expand(cfg.coding.workspace_dir)
+    try:
+        _ws.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    set_extra_write_roots([str(_ws), *[str(expand(p)) for p in cfg.coding.extra_write_roots]])
     actions = ActionLog(cfg)
     memory = Memory(cfg)
     permissions = PermissionManager(cfg)

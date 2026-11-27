@@ -160,7 +160,17 @@ model:
   max_tokens: 4096
   request_timeout_seconds: 300
   native_tool_calls: true
-  reasoning_effort: low
+  # none | low | medium | high. Only reasoning models (qwen3, deepseek-r1,
+  # gpt-oss…) accept this; JARVIS drops it automatically if a model refuses.
+  reasoning_effort: none
+  # Prompt size: auto = lean for localhost endpoints (compact persona + only
+  # the tools relevant to each request, fits Ollama's 4096-token default
+  # context), full for cloud. Force with `lean` or `full`.
+  prompt_mode: auto
+  max_tools: 14
+  history_budget_chars: 6000
+  # Launch `ollama serve` in the background if Ollama isn't running yet.
+  auto_start_ollama: true
 
 image_model:
   # Selectable in the JARVIS command bar. Options:
@@ -276,6 +286,8 @@ plugins:
   voice_tools_optional:  { enabled: true }
   vision_tools_optional: { enabled: true }
   barehands_tools:       { enabled: true }
+  coding_tools:          { enabled: true }   # code_search, read_code, edit_file, git_status, git_commit_push
+  github_tools:          { enabled: true }   # needs GITHUB_TOKEN in .env for private repos / PRs
   calendar_optional:     { enabled: false }
   email_optional:        { enabled: false }
   smart_home_optional:   { enabled: false }
@@ -303,6 +315,14 @@ agents:
   memory:   { enabled: true }
   vision:   { enabled: true }
   voice:    { enabled: true }
+
+# Coding mode ("/agent code" or the command palette → Coding mode).
+# github_clone puts repos in workspace_dir; JARVIS may write there and in
+# its own folder (plus any extra_write_roots). Token: GITHUB_TOKEN in .env.
+coding:
+  workspace_dir: "~/JARVIS-Projects"
+  extra_write_roots: []
+  github_token_env: GITHUB_TOKEN
 
 mission:
   enabled: false

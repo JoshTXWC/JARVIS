@@ -60,6 +60,22 @@ export default function CommandPalette() {
       });
     }
     out.push({
+      id: "mode:code",
+      label: "Coding mode (read, explain, edit code · GitHub)",
+      group: "Modes",
+      hint: "code",
+      run: () => {
+        undockPanel("chat");
+        wsClient.agent("code");
+      },
+    });
+    out.push({
+      id: "mode:standard",
+      label: "Standard mode",
+      group: "Modes",
+      run: () => wsClient.agent("jarvis"),
+    });
+    out.push({
       id: "task:pause",
       label: "Pause current task",
       group: "Tasks",

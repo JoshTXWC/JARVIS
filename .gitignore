@@ -49,3 +49,8 @@ integrations/barehands/state/wave.json
 
 # Research scratch (embedded repos, wheels, ~360MB, not used at runtime)
 data/research/
+
+# Runtime task state (written by TaskController)
+data/tasks/
+# Local Ollama/GGUF experiments
+*.gguf

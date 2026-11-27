@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
-import { DEFAULT_DOCKED } from "./dockCatalog";
+import { DEFAULT_DOCKED, DOCKABLE_IDS } from "./dockCatalog";
 
 export type OrbState = "idle" | "listening" | "thinking" | "speaking" | "executing" | "error";
 
@@ -710,7 +710,7 @@ export const useStore = create<StoreState>()(persist((set) => ({
       }
     } catch { /* ignore */ }
     if (!state.dockedPanels) state.dockedPanels = [...DEFAULT_DOCKED];
-    const allowed = new Set<string>(["chat", "health", "settings"]);
+    const allowed = new Set<string>(DOCKABLE_IDS);
     state.dockedPanels = state.dockedPanels.filter((id) => allowed.has(id));
     for (const id of DEFAULT_DOCKED) {
       if (!state.dockedPanels.includes(id)) {

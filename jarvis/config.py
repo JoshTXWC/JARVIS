@@ -32,6 +32,19 @@ class ModelConfig(BaseModel):
     request_timeout_seconds: int = 120
     native_tool_calls: bool = False
     reasoning_effort: str | None = None
+    # Prompt size strategy. `lean` sends a compact persona and only the tools
+    # relevant to the current request (needed for small local models and
+    # Ollama's default 4096-token context). `full` sends the whole persona and
+    # every tool. `auto` = lean for localhost endpoints, full for cloud.
+    prompt_mode: str = "auto"
+    # Max tool schemas sent per turn in lean mode.
+    max_tools: int = 14
+    # Lean mode: approximate character budget for conversation history sent
+    # per request (~4 chars per token). Older turns stay in memory.db.
+    history_budget_chars: int = 6000
+    # Start `ollama serve` in the background at boot when the endpoint is a
+    # local Ollama (port 11434) that isn't answering yet.
+    auto_start_ollama: bool = True
     # Anti-repetition — light touch. Higher values degrade fluency and can
     # paradoxically push the model into longer loops. Ollama already
     # auto-translates `frequency_penalty` → repeat_penalty internally, so
@@ -103,6 +116,19 @@ class PluginToggle(BaseModel):
 class AssistantConfig(BaseModel):
     name: str = "JARVIS"
     persona: str = "You are JARVIS, a calm, precise, proactive local AI assistant."
+    # Short persona used in lean prompt mode (small local models). Blank =
+    # built-in compact JARVIS persona (jarvis/core/tool_select.py).
+    persona_compact: str = ""
+
+
+class CodingConfig(BaseModel):
+    """Coding mode + GitHub. Repos cloned by `github_clone` land in
+    workspace_dir, which (with extra_write_roots) is writable by file/shell/
+    edit tools in addition to the JARVIS folder. Token: GITHUB_TOKEN in .env."""
+    workspace_dir: str = "~/JARVIS-Projects"
+    extra_write_roots: list[str] = Field(default_factory=list)
+    github_token_env: str = "GITHUB_TOKEN"
+    github_api: str = "https://api.github.com"
 
 
 class MissionConfig(BaseModel):
@@ -173,6 +199,9 @@ class VoiceConfig(BaseModel):
     edge_voice: str = "en-GB-ThomasNeural"
     edge_rate: str = "-6%"
     edge_pitch: str = "+0Hz"
+    # When provider=piper but Piper isn't installed / the voice file is
+    # missing, speak with the Edge British voice instead of staying silent.
+    edge_fallback: bool = True
     # Piper (community JARVIS model, closest to Paul Bettany)
     piper_enabled: bool = False
     piper_model: str = "data/voices/jarvis.onnx"
@@ -208,6 +237,7 @@ class Config(BaseModel):
     plugins: dict[str, PluginToggle] = Field(default_factory=dict)
     agents: dict[str, PluginToggle] = Field(default_factory=dict)
     mission: MissionConfig = Field(default_factory=MissionConfig)
+    coding: CodingConfig = Field(default_factory=CodingConfig)
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
     barehands: BarehandsConfig = Field(default_factory=BarehandsConfig)
     ultimate: UltimateConfig = Field(default_factory=UltimateConfig)

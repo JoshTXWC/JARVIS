@@ -4,6 +4,7 @@
 import ChatPanel from "../Chat/ChatPanel";
 import CommandBar from "../Chat/CommandBar";
 import Floating from "./Floating";
+import ModelManager from "./ModelManager";
 import Settings from "./Settings";
 import SystemHealth from "./SystemHealth";
 import { DOCK_META, DOCKABLE_IDS, type DockableId } from "../../lib/dockCatalog";
@@ -78,6 +79,8 @@ function WidgetWindow({ id }: { id: DockableId }) {
           </>
         ) : id === "health" ? (
           <SystemHealth />
+        ) : id === "models" ? (
+          <ModelManager />
         ) : (
           <div className="h-full overflow-y-auto p-4">
             <Settings />
