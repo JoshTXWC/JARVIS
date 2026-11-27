@@ -121,40 +121,65 @@ Cloud assistants rent you intelligence and read your data. JARVIS doesn't.
 
 ---
 
-## 🚀 Quick Start
+## 🚀 Quick Start (Windows, fully local)
 
-> **Requirements:** Windows 10/11 · Python 3.10+ · Node 18+ · an NVIDIA GPU (recommended,
-> for image/3D/Whisper) · and an LLM endpoint (e.g. [Ollama](https://ollama.com) or
-> [LM Studio](https://lmstudio.ai) running locally — or an API key).
+> **Requirements:** Windows 10/11 · Python 3.12 (3.10–3.13 work) · Node 20 LTS ·
+> [Ollama](https://ollama.com/download/windows) (setup installs it via winget if missing).
+> An NVIDIA GPU is recommended but not required.
 
 ```bat
 :: 1. Clone
-git clone https://github.com/Dix01/JARVIS.git
+git clone https://github.com/JoshTXWC/JARVIS.git
 cd JARVIS
 
-:: 2. Install backend venv + frontend deps + Electron
+:: 2. One-time setup (safe to re-run): venv + pip, Ollama, web UI, Electron,
+::    a chat model sized for your GPU, the memory embedding model, the JARVIS voice.
 setup.bat
 
-:: 3. Configure
-copy .env.example .env
-notepad .env          :: put your API key(s) here (optional for local models)
-notepad config.yaml   :: point `model.endpoint` at your LLM
-
-:: 4. Launch
-run.bat
+:: 3. Launch the desktop app
+run-app.bat
 ```
 
-Then open the desktop app (Electron) — or visit:
+That's it — `run-app.bat` starts the backend (which starts Ollama if it isn't running)
+and opens the JARVIS window. Say or type *"Hello JARVIS"*.
 
-```
-http://127.0.0.1:7341
-```
+- **Health check anytime:** `venv\Scripts\python -m jarvis.bootstrap --check`
+- **Backend only, in your browser:** `run.bat` → http://127.0.0.1:7341
+- **Frontend hot-reload:** `run-dev.bat`
+- **Image / 3D generation** (several GB): installed automatically by `setup.bat` when an
+  NVIDIA GPU is found (`set JARVIS_MEDIA=0` to skip, `=1` to force). Chat, voice, memory and
+  tools never need it. See `requirements-media.txt`.
+- **Optional keys** go in `.env` (copied from `.env.example`): `GITHUB_TOKEN` for pushing /
+  opening PRs, cloud model keys. Nothing is required for local use.
 
-Developing? `run-dev.bat` gives you hot-reload on the frontend.
+### Which local model?
+
+| Your GPU VRAM | Model setup picks | Notes |
+|---|---|---|
+| none / < 3 GB | `qwen2.5:1.5b` | Chats fine; weak at multi-step tool use. |
+| 3–6 GB | `qwen2.5:3b` | Reliable tool calls and code edits. |
+| 6–10 GB | `qwen2.5:7b` | Recommended. |
+| 10 GB + | `qwen2.5:14b` | Best quality. |
+
+Switch any time in the **Models** panel (cube icon in the dock) — it works like the Ollama
+app: browse, pull with progress, see installed / loaded models, delete, and **Use** to make
+one active. `setup.bat` also sets `OLLAMA_CONTEXT_LENGTH=8192` because Ollama's default
+4096-token context is too small for tool use; JARVIS additionally runs a compact "lean"
+prompt for local models (`model.prompt_mode` in `config.yaml`).
+
+### Coding mode
+
+Say **"coding mode"** (or pick *Coding mode* in the command palette, Ctrl+K) and JARVIS
+switches to its code agent: `code_search`, `read_code`, `edit_file` (shows a diff and asks
+before writing, keeps a backup), `git_status`, `git_commit_push` (refuses main/master), and
+GitHub tools — list repos, read files, issues/PRs, `github_clone` into `~/JARVIS-Projects`,
+and `github_create_pull_request`. Public repos work without a token; set `GITHUB_TOKEN` in
+`.env` for private repos, pushing and PRs. Say **"standard mode"** to go back.
 
 > 💡 **No GPU?** It still runs. Image/3D/Whisper degrade gracefully and heavy models
 > load lazily only when first used. Chat, web, memory, vision-via-API, and the full HUD
-> work on any machine.
+> work on any machine. If the Piper voice is missing, JARVIS falls back to the Edge
+> British neural voice automatically.
 
 ---
 

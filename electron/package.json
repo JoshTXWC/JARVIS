@@ -32,5 +32,8 @@
       "target": "nsis",
       "icon": "../web/public/favicon.svg"
     }
+  },
+  "allowScripts": {
+    "electron": true
   }
 }

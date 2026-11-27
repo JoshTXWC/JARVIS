@@ -39,26 +39,9 @@ google-genai>=1.0.0
 # GPU stats
 nvidia-ml-py>=12.0.0              # preferred; falls back to nvidia-smi if missing
 
-# Local AI image generation (FLUX.2-klein-4B GGUF). First use can download ~8 GB.
-torch>=2.4.0
-diffusers>=0.38.0
-transformers>=4.44.0
-accelerate>=0.34.0
-sentencepiece>=0.2.0
-safetensors>=0.4.4
-huggingface-hub>=0.24.0
-gguf>=0.10.0
-
-# Local 3D generation (Hunyuan3D-2GP Mini Turbo). The source snapshot and
-# model subfolders auto-download to data/models on first use.
-einops>=0.8.0
-omegaconf>=2.3.0
-pymeshlab>=2025.7
-mmgp==3.2.7
-rembg>=2.0.67
-onnxruntime>=1.18.0
-# Optional speed path for DMC mesh extraction if a compatible wheel/build exists:
-#   pip install diso
+# Local image / 3D generation (torch, diffusers, Hunyuan3D…) lives in
+# requirements-media.txt — optional, several GB, NVIDIA GPU recommended.
+# setup.bat installs it automatically when an NVIDIA GPU is detected.
 
 # OPTIONAL - GPU acceleration for Whisper STT (cuFFT/cuBLAS/cuDNN DLLs):
 #   pip install nvidia-cublas-cu12 nvidia-cudnn-cu12 nvidia-cufft-cu12

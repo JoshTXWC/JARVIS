@@ -111,7 +111,7 @@ export default function ModelManager() {
     );
   }, [library, query]);
 
-  const visibleJobs = jobs.filter((j) => j.status !== "success");
+  const visibleJobs = jobs.filter((j) => j.status !== "success" && j.status !== "cancelled");
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-3 p-4 text-[14px]">
