@@ -4,7 +4,9 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+from ..core.path_guard import PathDenied, assert_readable, assert_writable
 from ..core.permissions import Permission
+from ..core.secrets import redact_text
 from ..utils import files as F
 from .base import PluginInfo, tool
 
@@ -13,6 +15,7 @@ def register(registry):
     cfg = registry.cfg
     backup_dir = cfg.abs_path(cfg.backups.dir)
     ignore = cfg.project.ignore_patterns
+    root = cfg.project_root
 
     @tool(
         name="list_dir",
@@ -29,7 +32,10 @@ def register(registry):
         },
     )
     def list_dir(path: str, glob: str = "*", recursive: bool = False) -> str:
-        p = F.expand(path)
+        try:
+            p = assert_readable(path, root)
+        except PathDenied as e:
+            return f"DENIED: {e}"
         if not p.exists():
             return f"path does not exist: {p}"
         items = F.list_dir(p, glob=glob, recursive=recursive)
@@ -38,7 +44,7 @@ def register(registry):
 
     @tool(
         name="read_file",
-        description="Read a UTF-8 text file. Truncates to max_bytes.",
+        description="Read a UTF-8 text file under allowed roots. Truncates to max_bytes. Secrets redacted.",
         permission=Permission.SAFE,
         parameters={
             "type": "object",
@@ -50,16 +56,19 @@ def register(registry):
         },
     )
     def read_file(path: str, max_bytes: int = 200000) -> str:
-        p = F.expand(path)
+        try:
+            p = assert_readable(path, root)
+        except PathDenied as e:
+            return f"DENIED: {e}"
         if not p.exists():
             return f"path does not exist: {p}"
         if p.is_dir():
             return f"is a directory: {p}"
-        return F.read_text(p, max_bytes=max_bytes)
+        return redact_text(F.read_text(p, max_bytes=max_bytes))
 
     @tool(
         name="write_file",
-        description="Write text to a file. Backs up the existing file first. Creates parent dirs.",
+        description="Write text to a file inside the project root. Backs up the existing file first.",
         permission=Permission.CAUTION,
         parameters={
             "type": "object",
@@ -73,7 +82,10 @@ def register(registry):
         preview=lambda a: f"write {len(a.get('content','')):,} chars -> {a.get('path','')}",
     )
     def write_file(path: str, content: str, backup: bool = True) -> str:
-        p = F.expand(path)
+        try:
+            p = assert_writable(path, root)
+        except PathDenied as e:
+            return f"DENIED: {e}"
         backed = None
         if backup and p.exists() and cfg.backups.enabled:
             backed = F.backup_file(p, backup_dir)
@@ -86,7 +98,7 @@ def register(registry):
 
     @tool(
         name="append_file",
-        description="Append text to a file. Creates the file if missing.",
+        description="Append text to a file inside the project root. Creates the file if missing.",
         permission=Permission.CAUTION,
         parameters={
             "type": "object",
@@ -99,7 +111,10 @@ def register(registry):
         preview=lambda a: f"append {len(a.get('content','')):,} chars -> {a.get('path','')}",
     )
     def append_file(path: str, content: str) -> str:
-        p = F.expand(path)
+        try:
+            p = assert_writable(path, root)
+        except PathDenied as e:
+            return f"DENIED: {e}"
         p.parent.mkdir(parents=True, exist_ok=True)
         with p.open("a", encoding="utf-8") as f:
             f.write(content)
@@ -119,17 +134,20 @@ def register(registry):
             "required": ["root", "query"],
         },
     )
-    def search_files(root: str, query: str, max_hits: int = 100) -> str:
-        r = F.expand(root)
+    def search_files(root: str, query: str, max_hits: int = 100) -> str:  # noqa: A002
+        try:
+            r = assert_readable(root, cfg.project_root)
+        except PathDenied as e:
+            return f"DENIED: {e}"
         hits = F.search_in_files(r, query, ignore=ignore, max_hits=max_hits)
         if not hits:
             return f"no matches for '{query}' under {r}"
-        return "\n".join(f"{h['path']}:{h['line']}: {h['text']}" for h in hits)
+        return redact_text("\n".join(f"{h['path']}:{h['line']}: {h['text']}" for h in hits))
 
     @tool(
         name="mkdir",
-        description="Create a directory (with parents).",
-        permission=Permission.SAFE,
+        description="Create a directory inside the project root (with parents).",
+        permission=Permission.CAUTION,
         parameters={
             "type": "object",
             "properties": {"path": {"type": "string"}},
@@ -138,13 +156,16 @@ def register(registry):
         preview=lambda a: f"mkdir {a.get('path','')}",
     )
     def mkdir(path: str) -> str:
-        p = F.expand(path)
+        try:
+            p = assert_writable(path, root)
+        except PathDenied as e:
+            return f"DENIED: {e}"
         p.mkdir(parents=True, exist_ok=True)
         return f"created {p}"
 
     @tool(
         name="copy",
-        description="Copy a file or directory. Directories copy recursively.",
+        description="Copy a file or directory inside the project root. Directories copy recursively.",
         permission=Permission.CAUTION,
         parameters={
             "type": "object",
@@ -157,7 +178,11 @@ def register(registry):
         preview=lambda a: f"copy {a.get('src','')} -> {a.get('dst','')}",
     )
     def copy(src: str, dst: str) -> str:
-        s, d = F.expand(src), F.expand(dst)
+        try:
+            s = assert_readable(src, root)
+            d = assert_writable(dst, root)
+        except PathDenied as e:
+            return f"DENIED: {e}"
         if s.is_dir():
             shutil.copytree(s, d, dirs_exist_ok=True)
         else:
@@ -167,7 +192,7 @@ def register(registry):
 
     @tool(
         name="move",
-        description="Move/rename a file or directory.",
+        description="Move/rename a file or directory inside the project root.",
         permission=Permission.CAUTION,
         parameters={
             "type": "object",
@@ -180,14 +205,18 @@ def register(registry):
         preview=lambda a: f"move {a.get('src','')} -> {a.get('dst','')}",
     )
     def move(src: str, dst: str) -> str:
-        s, d = F.expand(src), F.expand(dst)
+        try:
+            s = assert_writable(src, root)
+            d = assert_writable(dst, root)
+        except PathDenied as e:
+            return f"DENIED: {e}"
         d.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(s), str(d))
         return f"moved {s} -> {d}"
 
     @tool(
         name="delete",
-        description="Delete a file or directory. Backed up first if it's a file. DANGEROUS.",
+        description="Delete a file or directory inside the project root. Backed up first if it's a file. DANGEROUS.",
         permission=Permission.DANGEROUS,
         parameters={
             "type": "object",
@@ -197,7 +226,10 @@ def register(registry):
         preview=lambda a: f"DELETE {a.get('path','')}",
     )
     def delete(path: str, recursive: bool = False) -> str:
-        p = F.expand(path)
+        try:
+            p = assert_writable(path, root)
+        except PathDenied as e:
+            return f"DENIED: {e}"
         if not p.exists():
             return f"does not exist: {p}"
         if p.is_file():

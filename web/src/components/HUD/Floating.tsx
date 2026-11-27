@@ -178,7 +178,7 @@ export default function Floating({
   /** Sticky grab from double-click — tile follows pointer until click/Esc. */
   const [carrying, setCarrying] = useState(false);
   const dragRef = useRef<{ startX: number; startY: number; orig: Box } | null>(null);
-  const resizeRef = useRef<{ startX: number; startY: number; orig: Box } | null>(null);
+  const resizeRef = useRef<{ startX: number; startY: number; orig: Box; edge: "se" | "e" | "s" } | null>(null);
   const carryRef = useRef<{ offsetX: number; offsetY: number } | null>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -603,35 +603,32 @@ export default function Floating({
 
   useEffect(() => () => setDraggingFlag(false), []);
 
-  const onResizeStart = useCallback((e: React.PointerEvent) => {
-    if (!resizeEnabled || docking) return;
-    e.stopPropagation();
-    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-    resizeRef.current = { startX: e.clientX, startY: e.clientY, orig: { ...display } };
-    setTransient({ ...display });
-    setFocused(true);
-  }, [resizeEnabled, docking, display]);
-
-  const onResizeMove = useCallback((e: React.PointerEvent) => {
+  const applyResize = useCallback((clientX: number, clientY: number, edge: "se" | "e" | "s") => {
     if (!resizeRef.current) return;
-    const dx = e.clientX - resizeRef.current.startX;
-    const dy = e.clientY - resizeRef.current.startY;
+    const dx = clientX - resizeRef.current.startX;
+    const dy = clientY - resizeRef.current.startY;
     const bounds = contentBounds();
     const next = {
       x: resizeRef.current.orig.x,
       y: resizeRef.current.orig.y,
-      w: Math.max(minW, resizeRef.current.orig.w + dx),
-      h: Math.max(minH, resizeRef.current.orig.h + dy),
+      w: resizeRef.current.orig.w,
+      h: resizeRef.current.orig.h,
     };
-    next.w = Math.min(next.w, bounds.right - next.x);
-    next.h = Math.min(next.h, bounds.bottom - next.y);
+    if (edge === "se" || edge === "e") {
+      next.w = Math.max(minW, resizeRef.current.orig.w + dx);
+      next.w = Math.min(next.w, bounds.right - next.x);
+    }
+    if (edge === "se" || edge === "s") {
+      next.h = Math.max(minH, resizeRef.current.orig.h + dy);
+      next.h = Math.min(next.h, bounds.bottom - next.y);
+    }
     setTransient(clampBox(next));
   }, [minW, minH]);
 
-  const onResizeEnd = useCallback((e: React.PointerEvent) => {
+  const commitResize = useCallback(() => {
     if (!resizeRef.current) return;
-    (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
     resizeRef.current = null;
+    setDraggingFlag(false);
     setTransient((t) => {
       if (t) {
         const next = clampBox(t);
@@ -640,6 +637,36 @@ export default function Floating({
       return null;
     });
   }, []);
+
+  const onResizeStart = useCallback((e: React.PointerEvent, edge: "se" | "e" | "s" = "se") => {
+    if (!resizeEnabled || docking || carrying) return;
+    e.preventDefault();
+    e.stopPropagation();
+    resizeRef.current = { startX: e.clientX, startY: e.clientY, orig: { ...display }, edge };
+    setTransient({ ...display });
+    setFocused(true);
+    setDraggingFlag(true);
+  }, [resizeEnabled, docking, carrying, display]);
+
+  // Window-level mouse/touch resize so cursor drag works outside the handle.
+  useEffect(() => {
+    const onMove = (e: PointerEvent) => {
+      if (!resizeRef.current) return;
+      applyResize(e.clientX, e.clientY, resizeRef.current.edge);
+    };
+    const onUp = () => {
+      if (!resizeRef.current) return;
+      commitResize();
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
+  }, [applyResize, commitResize]);
 
   return (
     <div
@@ -651,23 +678,29 @@ export default function Floating({
       onMouseLeave={() => { if (!dragging && !carrying) setFocused(false); }}
       title={
         carrying
-          ? "Click to place · drop on top menu to dock · Esc to cancel"
-          : canDock
-            ? "Drag to move · drop on top menu to dock"
-            : "Drag to move"
+          ? "Click to place · drop on side dock to put away · Esc to cancel"
+          : undefined
       }
-      className={`animate-boot_in fixed pointer-events-auto ${dragging || carrying ? "select-none" : ""} ${layoutEdit ? "ring-1 ring-jarvis-cyan/20" : ""} ${carrying ? "ring-1 ring-jarvis-aqua/50" : ""}`}
+      className={`animate-boot_in fixed pointer-events-auto ${dragging || carrying ? "select-none scale-[1.02]" : ""} ${docking ? "opacity-0" : ""}`}
       style={{
         left: display.x,
         top: display.y,
         width: display.w,
         height: autoHeight ? undefined : display.h,
         zIndex: focused || dragging || docking || carrying ? z + 5 : z,
-        willChange: docking ? "transform, opacity" : undefined,
-        opacity: carrying ? 0.92 : undefined,
-        transition: carrying ? "opacity 120ms ease" : undefined,
+        willChange: docking || dragging || carrying ? "transform, opacity" : undefined,
+        opacity: carrying ? 0.94 : undefined,
+        transition: docking
+          ? undefined
+          : carrying || dragging
+            ? "opacity 120ms ease, transform 180ms cubic-bezier(0.16,1,0.3,1)"
+            : "transform 220ms cubic-bezier(0.16,1,0.3,1)",
+        filter: dragging || carrying
+          ? "drop-shadow(0 28px 48px rgba(0,0,0,0.45))"
+          : undefined,
       }}
     >
+      {/* Invisible top strip for dedicated drag capture (content also has data-drag-handle). */}
       {!locked && !docking && (
         <div
           data-drag-handle
@@ -675,14 +708,9 @@ export default function Floating({
           onPointerMove={onHandlePointerMove}
           onPointerUp={onHandlePointerUp}
           onPointerCancel={onHandlePointerUp}
-          title={canDock ? "Drag · drop on top menu to dock" : "Drag"}
-          className="absolute top-0 left-0 right-0 h-7 z-30 cursor-grab active:cursor-grabbing"
-          style={{
-            touchAction: "none",
-            background: dragging || carrying
-              ? "linear-gradient(180deg, rgba(125,211,252,0.18), transparent)"
-              : "linear-gradient(180deg, rgba(125,211,252,0.08), transparent)",
-          }}
+          title={canDock ? "Drag · drop on side dock to put away" : "Drag"}
+          className="absolute top-0 left-0 right-0 h-10 z-30 cursor-grab active:cursor-grabbing"
+          style={{ touchAction: "none" }}
         />
       )}
 
@@ -699,26 +727,42 @@ export default function Floating({
         {children}
       </div>
 
-      {resizeEnabled && !docking && (
-        <div
-          onPointerDown={onResizeStart}
-          onPointerMove={onResizeMove}
-          onPointerUp={onResizeEnd}
-          onPointerCancel={onResizeEnd}
-          title="Resize"
-          data-no-drag
-          className="absolute bottom-0 right-0 w-5 h-5 z-30 cursor-nwse-resize"
-          style={{ touchAction: "none" }}
-        >
+      {resizeEnabled && !docking && !carrying && (
+        <>
+          {/* Right edge */}
           <div
-            className="absolute bottom-1.5 right-1.5 text-jarvis-ice/40 transition-opacity"
-            style={{ opacity: focused || dragging || layoutEdit ? 0.7 : 0.2 }}
+            onPointerDown={(e) => onResizeStart(e, "e")}
+            title="Resize width"
+            data-no-drag
+            className="absolute top-3 bottom-3 right-0 w-2 z-40 cursor-ew-resize"
+            style={{ touchAction: "none" }}
+          />
+          {/* Bottom edge */}
+          <div
+            onPointerDown={(e) => onResizeStart(e, "s")}
+            title="Resize height"
+            data-no-drag
+            className="absolute left-3 right-3 bottom-0 h-2 z-40 cursor-ns-resize"
+            style={{ touchAction: "none" }}
+          />
+          {/* Corner */}
+          <div
+            onPointerDown={(e) => onResizeStart(e, "se")}
+            title="Resize"
+            data-no-drag
+            className="absolute bottom-0 right-0 w-4 h-4 z-50 cursor-nwse-resize"
+            style={{ touchAction: "none" }}
           >
-            <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
-              <path d="M9 1 L1 9 M9 5 L5 9 M9 9 L9 9" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
-            </svg>
+            <div
+              className="absolute bottom-1 right-1 text-muted-foreground transition-opacity pointer-events-none"
+              style={{ opacity: focused || dragging || layoutEdit ? 0.85 : 0.4 }}
+            >
+              <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+                <path d="M9 1 L1 9 M9 5 L5 9 M9 9 L9 9" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+              </svg>
+            </div>
           </div>
-        </div>
+        </>
       )}
     </div>
   );

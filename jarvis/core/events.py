@@ -28,6 +28,8 @@ class EventKind(str, Enum):
     STREAM_DELTA = "stream_delta"  # incremental assistant token chunk
     STREAM_BEGIN = "stream_begin"  # marks start of a new streamed assistant turn
     STREAM_END = "stream_end"      # marks end of a streamed assistant turn
+    USAGE = "usage"                # token / timing stats for the last LLM hop
+    REASONING = "reasoning"        # model <thinking> / CoT block for the turn
     UI = "ui"                      # frontend chrome actions (e.g. open Barehands)
 
 

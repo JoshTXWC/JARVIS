@@ -5,6 +5,7 @@
  */
 import { useStore, type VoiceProfile } from "./store";
 import { getHealth } from "./api";
+import { apiFetch } from "./session";
 import { detectWake, stripWakeWord, normalizeWakeWord } from "./wakeWord";
 import { wsClient } from "./ws";
 
@@ -60,7 +61,12 @@ if (playerAudio) {
 }
 const streamState = { id: "", spokenChars: 0 };
 let pendingFetches = 0;
-let streamGeneration = 0;   // bumped on cancel — stale fetches compare this
+/** Bumped on cancel / barge-in — stale TTS fetches & playback must not land. */
+let streamGeneration = 0;
+/** Alias used by barge-in + UI as the active voice execution id. */
+export function voiceExecutionId(): number {
+  return streamGeneration;
+}
 let activeGeneration = 0;   // the generation that owns the currently-playing clip
 function voiceScore(voice: SpeechSynthesisVoice): number {
   const label = `${voice.name} ${voice.lang}`;
@@ -113,7 +119,7 @@ export function currentVoiceProfile(): VoiceProfile | null {
 
 async function refreshServerVoiceProfile(): Promise<void> {
   try {
-    const resp = await fetch("/api/tts/status");
+    const resp = await apiFetch("/api/tts/status");
     if (!resp.ok) return;
     const status = await resp.json();
     // Always surface as JARVIS regardless of backend provider label.
@@ -153,7 +159,7 @@ function stopServerAudio() {
 async function speakWithServerTts(clean: string): Promise<boolean> {
   try {
     console.log("[TTS] requesting server TTS…");
-    const resp = await fetch("/api/tts", {
+    const resp = await apiFetch("/api/tts", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text: clean }),
@@ -280,7 +286,7 @@ async function fetchAndEnqueue(text: string): Promise<void> {
   pendingFetches++;
   console.log("[TTS:fetch] START gen=%d, pendingFetches=%d, text=\"%s\"", gen, pendingFetches, text.slice(0, 50));
   try {
-    const resp = await fetch("/api/tts", {
+    const resp = await apiFetch("/api/tts", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text }),
@@ -565,12 +571,14 @@ export class JarvisMic {
     }
   }
 
-  // True barge-in: cut TTS + cancel the turn, then record the user's next command.
+  // True barge-in: bump execution id so stale audio/text cannot land, cut TTS,
+  // cancel the turn, then record the user's next command.
   private _startBargeIn() {
     this._loudRunStart = 0;
     if (this.isRecording || this._transcribing) return;
-    console.log("[STT] barge-in — cutting TTS and listening for command");
+    console.log("[STT] barge-in — cutting TTS exec=%d and listening", streamGeneration);
     cancelStreamingTts();
+    console.log("[STT] barge-in — new voice execution id=%d", streamGeneration);
     try { wsClient.cancel(); } catch { /* noop */ }
     this._ttsActive = false;
     this._awakeUntil = Date.now() + FOLLOWUP_WAKE_MS;
@@ -792,7 +800,7 @@ export class JarvisMic {
       const form = new FormData();
       form.append("audio", blob, "speech.webm");
 
-      const resp = await fetch("/api/stt", { method: "POST", body: form });
+      const resp = await apiFetch("/api/stt", { method: "POST", body: form });
       const result = await resp.json();
 
       console.log("[STT] result:", result);

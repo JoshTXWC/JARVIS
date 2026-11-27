@@ -25,6 +25,146 @@ from pydantic import BaseModel
 router = APIRouter()
 _stt_log = logging.getLogger("jarvis.stt")
 
+# Paths that do not require a session token (loopback bootstrap + health).
+_PUBLIC_API_SUFFIXES = {
+    "/health",
+    "/session/bootstrap",
+}
+
+
+def _client_is_loopback(request: Request) -> bool:
+    host = (request.client.host if request.client else "") or ""
+    return host in {"127.0.0.1", "::1", "localhost"}
+
+
+def _extract_session(request: Request) -> str | None:
+    return (
+        request.headers.get("x-jarvis-session")
+        or request.query_params.get("session")
+        or None
+    )
+
+
+async def require_session(request: Request) -> None:
+    """FastAPI dependency — privileged API routes."""
+    from ..core.session_auth import get_session_auth
+    path = request.url.path
+    if any(path.endswith(s) for s in _PUBLIC_API_SUFFIXES):
+        return
+    auth = get_session_auth()
+    if auth.check(_extract_session(request)):
+        return
+    from fastapi import HTTPException
+    raise HTTPException(status_code=401, detail="session required")
+
+
+@router.get("/session/bootstrap")
+async def session_bootstrap(request: Request):
+    """Mint/return desktop session for Electron or local UI. Loopback only."""
+    from ..core.session_auth import get_session_auth
+    if not _client_is_loopback(request):
+        return JSONResponse({"ok": False, "error": "loopback only"}, status_code=403)
+    auth = get_session_auth()
+    return auth.mint_bootstrap_payload()
+
+
+@router.get("/security/status")
+async def security_status(request: Request):
+    await require_session(request)
+    orch = request.app.state.orchestrator
+    auth = request.app.state.session_auth
+    tools = []
+    try:
+        for t in request.app.state.registry.list_tools():
+            tools.append({
+                "name": t.name if hasattr(t, "name") else t.get("name"),
+                "permission": (
+                    t.permission.value if hasattr(t, "permission")
+                    else t.get("permission")
+                ),
+            })
+    except Exception:
+        tools = []
+    privileged = [t for t in tools if (t.get("permission") or "") in {"caution", "dangerous"}]
+    return {
+        "mode": orch.permissions.mode,
+        "auth_required": not auth.disabled,
+        "session_ok": auth.check(_extract_session(request)),
+        "pending_grants": orch.permissions.pending_grants(),
+        "recent_events": orch.permissions.recent_events(40),
+        "privileged_tools": privileged,
+        "tool_count": len(tools),
+    }
+
+
+class _ModeBody(BaseModel):
+    mode: str
+
+
+@router.post("/security/mode")
+async def security_set_mode(body: _ModeBody, request: Request):
+    await require_session(request)
+    orch = request.app.state.orchestrator
+    try:
+        orch.permissions.set_mode(body.mode)
+    except ValueError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+    return {"ok": True, "mode": orch.permissions.mode}
+
+
+@router.post("/security/kill")
+async def security_kill(request: Request):
+    """Emergency stop: revoke grants. Running WS tasks cancelled by client kill_switch."""
+    await require_session(request)
+    orch = request.app.state.orchestrator
+    n = orch.permissions.revoke_all_grants()
+    return {"ok": True, "revoked": n}
+
+
+@router.get("/tasks/status")
+async def tasks_status(request: Request):
+    await require_session(request)
+    return request.app.state.orchestrator.tasks.status()
+
+
+@router.post("/tasks/pause")
+async def tasks_pause(request: Request):
+    await require_session(request)
+    ok = request.app.state.orchestrator.tasks.request_pause()
+    return {"ok": ok, **request.app.state.orchestrator.tasks.status()}
+
+
+@router.post("/tasks/resume")
+async def tasks_resume(request: Request):
+    await require_session(request)
+    ok = request.app.state.orchestrator.tasks.request_resume()
+    return {"ok": ok, **request.app.state.orchestrator.tasks.status()}
+
+
+@router.post("/workspace/project")
+async def workspace_set_project(request: Request):
+    """Associate a project directory for scoped reads (must stay under allowlist roots)."""
+    await require_session(request)
+    body = await request.json()
+    path = (body or {}).get("path") or ""
+    from ..core.path_guard import PathDenied, assert_readable
+    from ..config import PROJECT_ROOT
+    try:
+        # Validate exists and is a directory under readable roots; do not ingest secrets.
+        p = assert_readable(path, PROJECT_ROOT, allow_home=True)
+        if not p.is_dir():
+            return JSONResponse({"ok": False, "error": "not a directory"}, status_code=400)
+        request.app.state.workspace_project = str(p)
+        return {"ok": True, "path": str(p)}
+    except PathDenied as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=403)
+
+
+@router.get("/workspace/project")
+async def workspace_get_project(request: Request):
+    await require_session(request)
+    return {"path": getattr(request.app.state, "workspace_project", None)}
+
 # ── VRAM manager integration ────────────────────────────────────────────────
 from ..core.vram_manager import (
     GPUResource,
@@ -480,6 +620,121 @@ async def barehands_close_endpoint(request: Request):
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
 
+# ── Barehands 2.0 desktop control (loopback + session only) ───────────────
+
+def _desktop_control(request: Request):
+    from ..integrations.desktop_control import get_desktop_control
+    svc = getattr(request.app.state, "desktop_control", None)
+    if svc is None:
+        data = request.app.state.cfg.abs_path("data")
+        svc = get_desktop_control(data)
+        request.app.state.desktop_control = svc
+    return svc
+
+
+async def _require_desktop_control(request: Request):
+    """Session + loopback — never expose OS input injection off-machine."""
+    await require_session(request)
+    if not _client_is_loopback(request):
+        return JSONResponse(
+            {"ok": False, "error": "desktop control is loopback-only"},
+            status_code=403,
+        )
+    return None
+
+
+@router.get("/desktop-control/status")
+async def desktop_control_status(request: Request):
+    denied = await _require_desktop_control(request)
+    if denied is not None:
+        return denied
+    return _desktop_control(request).status()
+
+
+class DesktopControlSettingsBody(BaseModel):
+    patch: dict = {}
+
+
+@router.post("/desktop-control/settings")
+async def desktop_control_settings(request: Request, body: DesktopControlSettingsBody):
+    denied = await _require_desktop_control(request)
+    if denied is not None:
+        return denied
+    try:
+        return _desktop_control(request).update_settings(body.patch or {})
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
+
+class DesktopControlModeBody(BaseModel):
+    mode: str
+
+
+@router.post("/desktop-control/mode")
+async def desktop_control_mode(request: Request, body: DesktopControlModeBody):
+    denied = await _require_desktop_control(request)
+    if denied is not None:
+        return denied
+    try:
+        return _desktop_control(request).set_mode(body.mode)
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
+
+class DesktopControlEnableBody(BaseModel):
+    enabled: bool
+
+
+@router.post("/desktop-control/enable")
+async def desktop_control_enable(request: Request, body: DesktopControlEnableBody):
+    denied = await _require_desktop_control(request)
+    if denied is not None:
+        return denied
+    return _desktop_control(request).set_enabled(bool(body.enabled))
+
+
+class DesktopControlPauseBody(BaseModel):
+    paused: bool
+
+
+@router.post("/desktop-control/pause")
+async def desktop_control_pause(request: Request, body: DesktopControlPauseBody):
+    denied = await _require_desktop_control(request)
+    if denied is not None:
+        return denied
+    return _desktop_control(request).set_paused(bool(body.paused))
+
+
+@router.post("/desktop-control/emergency-stop")
+async def desktop_control_emergency_stop(request: Request):
+    denied = await _require_desktop_control(request)
+    if denied is not None:
+        return denied
+    return _desktop_control(request).emergency_stop()
+
+
+@router.post("/desktop-control/frame")
+async def desktop_control_frame(request: Request):
+    """Low-frequency fallback; prefer WS `hands_frame` for cursor streaming."""
+    denied = await _require_desktop_control(request)
+    if denied is not None:
+        return denied
+    try:
+        payload = await request.json()
+    except Exception:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": "invalid json"}, status_code=400)
+    return _desktop_control(request).ingest_frame(payload if isinstance(payload, dict) else {})
+
+
+@router.get("/desktop-control/actions")
+async def desktop_control_actions(request: Request):
+    denied = await _require_desktop_control(request)
+    if denied is not None:
+        return denied
+    from ..integrations.desktop_control.actions import describe_actions
+    return {"ok": True, "actions": describe_actions()}
+
+
 @router.get("/image-models")
 async def image_models(request: Request):
     cfg = request.app.state.cfg
@@ -495,6 +750,9 @@ async def select_image_model_endpoint(request: Request, body: ImageModelSelectBo
         return {"ok": True, **select_image_model(cfg, body.model)}
     except Exception as e:  # noqa: BLE001
         return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
+
+REASONING_LEVELS = ("none", "low", "medium", "high")
 
 
 @router.get("/models")
@@ -532,12 +790,398 @@ async def list_llm_models(request: Request):
         gpu_vendor=gpu.get("vendor"),
         shared_memory=bool(gpu.get("shared_memory")),
     )
+    effort = (getattr(cfg.model, "reasoning_effort", None) or "none").lower().strip() or "none"
     payload.update({
         "provider": cfg.model.provider,
         "endpoint": cfg.model.endpoint,
         "installed": installed,
+        "reasoning_effort": effort if effort in REASONING_LEVELS else "none",
+        "reasoning_levels": list(REASONING_LEVELS),
     })
     return payload
+
+
+def _ollama_native_base(cfg) -> str:
+    """Derive Ollama's native HTTP root (…:11434) from configured endpoints."""
+    for ep in (getattr(cfg.model, "local_endpoint", None), getattr(cfg.model, "endpoint", None)):
+        ep = (ep or "").rstrip("/")
+        if "11434" in ep:
+            return ep.replace("/v1", "") if ep.endswith("/v1") else ep
+    return "http://127.0.0.1:11434"
+
+
+def _llama_cpp_base(cfg) -> str | None:
+    """Best-effort llama.cpp server root when endpoint looks like one."""
+    ep = (getattr(cfg.model, "endpoint", None) or "").rstrip("/")
+    if not ep:
+        return None
+    # Native OpenAI shim is usually http://host:8080/v1
+    if ep.endswith("/v1"):
+        return ep[:-3]
+    return ep
+
+
+def _persist_model_field(key: str, value: str) -> bool:
+    """Surgical write under the top-level `model:` block in config.yaml."""
+    try:
+        from ..config import DEFAULT_CONFIG_PATH
+        path = DEFAULT_CONFIG_PATH
+        text = path.read_text(encoding="utf-8")
+        updated, n = re.subn(
+            rf"(?m)^(model:\s*\n(?:  .*\n)*?  {re.escape(key)}:\s*)([^\n#]+)",
+            lambda m: m.group(1) + value,
+            text,
+            count=1,
+        )
+        if n:
+            path.write_text(updated, encoding="utf-8")
+            return True
+        # Insert after max_tokens if the key is missing.
+        updated, n = re.subn(
+            r"(?m)^(model:\s*\n(?:  .*\n)*?  max_tokens:\s*[^\n]+\n)",
+            rf"\1  {key}: {value}\n",
+            text,
+            count=1,
+        )
+        if n:
+            path.write_text(updated, encoding="utf-8")
+            return True
+    except Exception as e:  # noqa: BLE001
+        logging.getLogger("jarvis.api").warning("persist model.%s failed: %s", key, e)
+    return False
+
+
+@router.get("/models/loaded")
+async def list_loaded_models(request: Request):
+    """Resident + available models (Ollama /api/ps or llama.cpp router)."""
+    cfg = request.app.state.cfg
+    loaded: list[dict] = []
+    available: list[dict] = []
+    source = "none"
+    context_length = None
+    effort = (getattr(cfg.model, "reasoning_effort", None) or "none").lower().strip() or "none"
+
+    # Ollama runners
+    ollama = _ollama_native_base(cfg)
+    try:
+        async with httpx.AsyncClient(timeout=2.5) as client:
+            r = await client.get(f"{ollama}/api/ps")
+            if r.status_code == 200:
+                source = "ollama"
+                for m in (r.json() or {}).get("models") or []:
+                    name = (m.get("name") or m.get("model") or "").strip()
+                    if not name:
+                        continue
+                    size = int(m.get("size") or 0)
+                    size_vram = int(m.get("size_vram") or 0)
+                    details = m.get("details") or {}
+                    entry = {
+                        "id": name,
+                        "name": name,
+                        "backend": "ollama",
+                        "status": "loaded",
+                        "size_bytes": size,
+                        "size_vram_bytes": size_vram,
+                        "size_gb": round(size / 1e9, 2) if size else None,
+                        "size_vram_gb": round(size_vram / 1e9, 2) if size_vram else None,
+                        "family": details.get("family") or details.get("parent_model"),
+                        "parameter_size": details.get("parameter_size"),
+                        "quantization": details.get("quantization_level"),
+                        "expires_at": m.get("expires_at"),
+                        "unloadable": True,
+                        "loadable": False,
+                    }
+                    try:
+                        show = await client.post(f"{ollama}/api/show", json={"name": name})
+                        if show.status_code == 200:
+                            info = (show.json() or {}).get("model_info") or {}
+                            for k, v in info.items():
+                                if str(k).endswith("context_length") and isinstance(v, (int, float)):
+                                    entry["context_length"] = int(v)
+                                    context_length = context_length or int(v)
+                                    break
+                    except Exception:  # noqa: BLE001
+                        pass
+                    loaded.append(entry)
+
+            # Installed-but-not-resident Ollama tags (loadable)
+            try:
+                tags = await client.get(f"{ollama}/api/tags")
+                if tags.status_code == 200:
+                    resident = {e["id"] for e in loaded}
+                    for m in (tags.json() or {}).get("models") or []:
+                        name = (m.get("name") or m.get("model") or "").strip()
+                        if not name or name in resident:
+                            continue
+                        details = m.get("details") or {}
+                        available.append({
+                            "id": name,
+                            "name": name,
+                            "backend": "ollama",
+                            "status": "unloaded",
+                            "parameter_size": details.get("parameter_size"),
+                            "quantization": details.get("quantization_level"),
+                            "family": details.get("family"),
+                            "unloadable": False,
+                            "loadable": True,
+                        })
+                    if available and source == "none":
+                        source = "ollama"
+            except Exception:  # noqa: BLE001
+                pass
+    except Exception as e:  # noqa: BLE001
+        logging.getLogger("jarvis.api").debug("ollama /api/ps failed: %s", e)
+
+    # llama.cpp router — prefer this when endpoint points at llama-server
+    base = _llama_cpp_base(cfg)
+    if base and "11434" not in base:
+        try:
+            async with httpx.AsyncClient(timeout=2.5) as client:
+                for path in ("/models", "/v1/models"):
+                    try:
+                        r = await client.get(f"{base}{path}")
+                    except Exception:  # noqa: BLE001
+                        continue
+                    if r.status_code != 200:
+                        continue
+                    data = r.json()
+                    items = data.get("data") or data.get("models") or []
+                    if not items and path != "/models":
+                        continue
+                    source = "llama.cpp"
+                    loaded = []
+                    available = []
+                    for item in items:
+                        mid = item.get("id") or item.get("name") or item.get("model")
+                        if not mid:
+                            continue
+                        status = (item.get("status") or "loaded").lower()
+                        entry = {
+                            "id": mid,
+                            "name": mid,
+                            "backend": "llama.cpp",
+                            "status": status,
+                            "unloadable": status in {"loaded", "loading", "sleeping"},
+                            "loadable": status in {"unloaded", "missing", ""},
+                        }
+                        if status in {"unloaded", "missing"}:
+                            available.append(entry)
+                        else:
+                            loaded.append(entry)
+                    break
+                # props for context
+                try:
+                    props = await client.get(f"{base}/props")
+                    if props.status_code == 200:
+                        pdata = props.json() or {}
+                        n_ctx = (pdata.get("default_generation_settings") or {}).get("n_ctx")
+                        if n_ctx:
+                            context_length = int(n_ctx)
+                            for e in loaded:
+                                e.setdefault("context_length", int(n_ctx))
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception as e:  # noqa: BLE001
+            logging.getLogger("jarvis.api").debug("llama.cpp loaded probe failed: %s", e)
+
+    if not context_length:
+        context_length = 8192
+
+    return {
+        "ok": True,
+        "source": source,
+        "loaded": loaded,
+        "available": available,
+        "context_length": context_length,
+        "selected": cfg.model.model,
+        "endpoint": cfg.model.endpoint,
+        "reasoning_effort": effort if effort in REASONING_LEVELS else "none",
+        "reasoning_levels": list(REASONING_LEVELS),
+    }
+
+
+class LlmModelUnloadBody(BaseModel):
+    model: str
+
+
+class LlmModelLoadBody(BaseModel):
+    model: str
+
+
+class LlmReasoningBody(BaseModel):
+    effort: str
+
+
+@router.post("/models/unload")
+async def unload_llm_model(request: Request, body: LlmModelUnloadBody):
+    """Evict a resident model from Ollama or llama.cpp to free VRAM."""
+    cfg = request.app.state.cfg
+    name = (body.model or "").strip()
+    if not name:
+        return JSONResponse({"ok": False, "error": "model required"}, status_code=400)
+
+    errors: list[str] = []
+
+    # Prefer llama.cpp when the active endpoint is not Ollama.
+    base = _llama_cpp_base(cfg)
+    ep = (cfg.model.endpoint or "")
+    prefer_llama = base and "11434" not in ep
+    if prefer_llama:
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                r = await client.post(f"{base}/models/unload", json={"model": name})
+                if r.status_code < 400:
+                    return {"ok": True, "unloaded": name, "backend": "llama.cpp"}
+                errors.append(f"llama.cpp HTTP {r.status_code}: {r.text[:200]}")
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"llama.cpp: {e}")
+
+    # Ollama
+    ollama = _ollama_native_base(cfg)
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            r = await client.post(
+                f"{ollama}/api/generate",
+                json={"model": name, "keep_alive": 0, "prompt": ""},
+            )
+            if r.status_code < 400:
+                return {"ok": True, "unloaded": name, "backend": "ollama"}
+            errors.append(f"ollama HTTP {r.status_code}")
+    except Exception as e:  # noqa: BLE001
+        errors.append(f"ollama: {e}")
+
+    # llama.cpp fallback if we tried Ollama first
+    if not prefer_llama and base and "11434" not in base:
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                r = await client.post(f"{base}/models/unload", json={"model": name})
+                if r.status_code < 400:
+                    return {"ok": True, "unloaded": name, "backend": "llama.cpp"}
+                errors.append(f"llama.cpp HTTP {r.status_code}")
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"llama.cpp: {e}")
+
+    return JSONResponse(
+        {"ok": False, "error": "; ".join(errors) or "unload failed"},
+        status_code=400,
+    )
+
+
+@router.post("/models/load")
+async def load_llm_model(request: Request, body: LlmModelLoadBody):
+    """Load a model into memory (llama.cpp router or Ollama keep_alive)."""
+    cfg = request.app.state.cfg
+    name = (body.model or "").strip()
+    if not name:
+        return JSONResponse({"ok": False, "error": "model required"}, status_code=400)
+
+    errors: list[str] = []
+    base = _llama_cpp_base(cfg)
+    ep = (cfg.model.endpoint or "")
+    prefer_llama = base and "11434" not in ep
+
+    if prefer_llama:
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                r = await client.post(f"{base}/models/load", json={"model": name})
+                if r.status_code < 400:
+                    return {"ok": True, "loaded": name, "backend": "llama.cpp"}
+                errors.append(f"llama.cpp HTTP {r.status_code}: {r.text[:200]}")
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"llama.cpp: {e}")
+
+    # Ollama: touch the model so it becomes resident
+    ollama = _ollama_native_base(cfg)
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            r = await client.post(
+                f"{ollama}/api/generate",
+                json={"model": name, "keep_alive": "30m", "prompt": ""},
+            )
+            if r.status_code < 400:
+                return {"ok": True, "loaded": name, "backend": "ollama"}
+            errors.append(f"ollama HTTP {r.status_code}")
+    except Exception as e:  # noqa: BLE001
+        errors.append(f"ollama: {e}")
+
+    if not prefer_llama and base and "11434" not in base:
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                r = await client.post(f"{base}/models/load", json={"model": name})
+                if r.status_code < 400:
+                    return {"ok": True, "loaded": name, "backend": "llama.cpp"}
+                errors.append(f"llama.cpp HTTP {r.status_code}")
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"llama.cpp: {e}")
+
+    return JSONResponse(
+        {"ok": False, "error": "; ".join(errors) or "load failed"},
+        status_code=400,
+    )
+
+
+@router.post("/models/reasoning")
+async def set_reasoning_effort(request: Request, body: LlmReasoningBody):
+    """Set chat reasoning_effort (none/low/medium/high) for llama.cpp / OpenAI-compat."""
+    cfg = request.app.state.cfg
+    effort = (body.effort or "").strip().lower()
+    if effort not in REASONING_LEVELS:
+        return JSONResponse(
+            {"ok": False, "error": f"effort must be one of {', '.join(REASONING_LEVELS)}"},
+            status_code=400,
+        )
+    cfg.model.reasoning_effort = None if effort == "none" else effort
+    persisted = _persist_model_field("reasoning_effort", effort)
+    return {
+        "ok": True,
+        "reasoning_effort": effort,
+        "persisted": persisted,
+    }
+
+
+class LlmModelPullBody(BaseModel):
+    model: str
+
+
+@router.post("/models/pull")
+async def pull_llm_model(request: Request, body: LlmModelPullBody):
+    """Download a local model via `ollama pull` (best-effort)."""
+    import asyncio
+    import shutil
+
+    name = (body.model or "").strip()
+    if not name:
+        return JSONResponse({"ok": False, "error": "model required"}, status_code=400)
+
+    # Strip a leading `ollama pull ` if a catalog pull string was passed through.
+    if name.lower().startswith("ollama pull "):
+        name = name[12:].strip()
+
+    ollama_bin = shutil.which("ollama")
+    if not ollama_bin:
+        return JSONResponse(
+            {"ok": False, "error": "ollama CLI not found on PATH"},
+            status_code=400,
+        )
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            ollama_bin,
+            "pull",
+            name,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        out_b, _ = await proc.communicate()
+        out = (out_b or b"").decode("utf-8", "replace")[-2000:]
+        if proc.returncode != 0:
+            return JSONResponse(
+                {"ok": False, "error": out.strip() or f"ollama pull failed ({proc.returncode})"},
+                status_code=400,
+            )
+        return {"ok": True, "pulled": name, "log": out.strip()[-500:]}
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
 
 
 @router.post("/models/select")

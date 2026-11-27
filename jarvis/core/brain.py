@@ -17,6 +17,7 @@ import contextvars
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Callable
 
@@ -83,6 +84,10 @@ def _openai_compat_payload(
         payload["reasoning_effort"] = reasoning_effort
     if tool_schemas:
         payload["tools"] = [{"type": "function", "function": s} for s in tool_schemas]
+    # OpenAI / llama.cpp / newer Ollama: usage on the final SSE chunk.
+    # Older local shims may reject this — stream path retries without it.
+    if stream:
+        payload["stream_options"] = {"include_usage": True}
     return payload
 
 
@@ -96,7 +101,7 @@ XML_TOOL_RE = re.compile(
     r"<(?P<name>[a-zA-Z_][\w-]*)>\s*(?P<body>.*?)\s*</(?P=name)>",
     re.DOTALL,
 )
-THOUGHT_RE = re.compile(r"<thinking>.*?</thinking>", re.DOTALL | re.IGNORECASE)
+THOUGHT_RE = re.compile(r"<thinking>(.*?)</thinking>", re.DOTALL | re.IGNORECASE)
 
 
 @dataclass
@@ -108,11 +113,40 @@ class ToolCall:
 
 
 @dataclass
+class BrainUsage:
+    """Token / timing stats for one LLM hop (llama.cpp / OpenAI / Ollama)."""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    duration_ms: float = 0.0
+    tokens_per_second: float = 0.0
+    prompt_per_second: float = 0.0
+    cache_tokens: int = 0
+    context_used: int = 0
+    model: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.total_tokens,
+            "duration_ms": round(self.duration_ms, 1),
+            "tokens_per_second": round(self.tokens_per_second, 2),
+            "prompt_per_second": round(self.prompt_per_second, 2),
+            "cache_tokens": self.cache_tokens,
+            "context_used": self.context_used or self.total_tokens,
+            "model": self.model,
+        }
+
+
+@dataclass
 class BrainReply:
     text: str                       # cleaned final text (no tool tags)
     tool_calls: list[ToolCall] = field(default_factory=list)
     raw: str = ""                   # untouched assistant message
     finish_reason: str | None = None
+    reasoning: str = ""             # extracted <thinking> blocks
+    usage: BrainUsage | None = None
 
 
 REACT_INSTRUCTIONS = """\
@@ -225,6 +259,7 @@ class LLMBrain:
             tool_schemas=tool_schemas if self.mc.native_tool_calls else None,
         )
 
+        t0 = time.perf_counter()
         try:
             resp = await self._client.post(url, json=payload, headers=headers)
             resp.raise_for_status()
@@ -238,6 +273,7 @@ class LLMBrain:
             return BrainReply(text=f"[brain error] {detail}", raw=detail)
 
         data = resp.json()
+        duration_ms = (time.perf_counter() - t0) * 1000.0
         choice = (data.get("choices") or [{}])[0]
         msg = choice.get("message", {}) or {}
         raw_text: str = msg.get("content") or ""
@@ -266,7 +302,20 @@ class LLMBrain:
             tool_calls = _parse_react_tool_calls(raw_text)
 
         clean_text = _strip_artifacts(raw_text)
-        return BrainReply(text=clean_text, tool_calls=tool_calls, raw=raw_text, finish_reason=finish)
+        usage = _usage_from_response(
+            data,
+            model=self.active_model,
+            completion_text=clean_text,
+            duration_ms=duration_ms,
+        )
+        return BrainReply(
+            text=clean_text,
+            tool_calls=tool_calls,
+            raw=raw_text,
+            finish_reason=finish,
+            reasoning=_extract_reasoning(raw_text),
+            usage=usage,
+        )
 
     # ------------------------------------------------------------------
     async def _chat_openai_compatible_stream(
@@ -304,13 +353,20 @@ class LLMBrain:
         tc_acc: dict[int, dict[str, Any]] = {}
         finish_reason: str | None = None
         loop_truncated = False
+        last_chunk: dict[str, Any] = {}
+        t0 = time.perf_counter()
 
-        try:
-            async with self._client.stream("POST", url, json=payload, headers=headers) as resp:
+        async def _stream_once(body: dict[str, Any]) -> tuple[list[str], dict[int, dict[str, Any]], str | None, dict[str, Any], bool, int | None, str]:
+            """Returns text_parts, tc_acc, finish_reason, last_chunk, loop_truncated, http_status, err_body."""
+            parts: list[str] = []
+            acc: dict[int, dict[str, Any]] = {}
+            finish: str | None = None
+            last: dict[str, Any] = {}
+            truncated = False
+            async with self._client.stream("POST", url, json=body, headers=headers) as resp:
                 if resp.status_code >= 400:
-                    body = (await resp.aread()).decode("utf-8", "replace")[:500]
-                    log.error("LLM stream HTTP %s: %s", resp.status_code, body)
-                    return BrainReply(text=f"[brain error] HTTP {resp.status_code}: {body}", raw=body)
+                    err = (await resp.aread()).decode("utf-8", "replace")[:500]
+                    return parts, acc, finish, last, truncated, resp.status_code, err
                 async for line in resp.aiter_lines():
                     if not line:
                         continue
@@ -322,33 +378,30 @@ class LLMBrain:
                         chunk = json.loads(line)
                     except json.JSONDecodeError:
                         continue
-                    choice = (chunk.get("choices") or [{}])[0]
+                    last = chunk
+                    choice = (chunk.get("choices") or [{}])[0] if chunk.get("choices") else {}
                     delta = choice.get("delta", {}) or {}
                     if choice.get("finish_reason"):
-                        finish_reason = choice["finish_reason"]
-                    # Text delta
+                        finish = choice["finish_reason"]
                     piece = delta.get("content")
                     if piece:
-                        text_parts.append(piece)
+                        parts.append(piece)
                         if on_delta:
                             try:
                                 on_delta(piece)
                             except Exception:  # noqa: BLE001
                                 pass
-                        # Loop watchdog: abort if we detect ≥3-fold back-to-back
-                        # repetition in the last 240 chars.
-                        cut = _detect_repetition_loop("".join(text_parts))
+                        cut = _detect_repetition_loop("".join(parts))
                         if cut is not None:
-                            loop_truncated = True
-                            full = "".join(text_parts)
-                            text_parts = [full[:cut]]
-                            finish_reason = finish_reason or "repetition_loop"
+                            truncated = True
+                            full = "".join(parts)
+                            parts = [full[:cut]]
+                            finish = finish or "repetition_loop"
                             log.warning("stream aborted: repetition loop at offset %d", cut)
                             break
-                    # Tool call deltas
                     for tc in delta.get("tool_calls") or []:
                         idx = tc.get("index", 0)
-                        slot = tc_acc.setdefault(idx, {"id": "", "name": "", "args": ""})
+                        slot = acc.setdefault(idx, {"id": "", "name": "", "args": ""})
                         if tc.get("id"):
                             slot["id"] = tc["id"]
                         fn = tc.get("function") or {}
@@ -356,10 +409,24 @@ class LLMBrain:
                             slot["name"] = fn["name"]
                         if fn.get("arguments"):
                             slot["args"] += fn["arguments"]
+            return parts, acc, finish, last, truncated, None, ""
+
+        try:
+            text_parts, tc_acc, finish_reason, last_chunk, loop_truncated, status, err_body = await _stream_once(payload)
+            if status is not None and "stream_options" in payload and status == 400:
+                # Older Ollama / LM Studio builds reject stream_options — retry once.
+                log.info("stream_options rejected; retrying without include_usage")
+                payload.pop("stream_options", None)
+                text_parts, tc_acc, finish_reason, last_chunk, loop_truncated, status, err_body = await _stream_once(payload)
+            if status is not None:
+                log.error("LLM stream HTTP %s: %s", status, err_body)
+                return BrainReply(text=f"[brain error] HTTP {status}: {err_body}", raw=err_body)
         except httpx.HTTPError as e:
             detail = _http_error_detail(e)
             log.error("LLM stream HTTP error: %s", detail)
             return BrainReply(text=f"[brain error] {detail}", raw=detail)
+
+        duration_ms = (time.perf_counter() - t0) * 1000.0
 
         if loop_truncated and on_delta:
             # Tell the consumer we cut. Optional — the UI already has the text.
@@ -387,11 +454,20 @@ class LLMBrain:
         if not tool_calls:
             tool_calls = _parse_react_tool_calls(raw_text)
 
+        clean = _strip_artifacts(raw_text)
+        usage = _usage_from_response(
+            last_chunk,
+            model=self.active_model,
+            completion_text=clean,
+            duration_ms=duration_ms,
+        )
         return BrainReply(
-            text=_strip_artifacts(raw_text),
+            text=clean,
             tool_calls=tool_calls,
             raw=raw_text,
             finish_reason=finish_reason,
+            reasoning=_extract_reasoning(raw_text),
+            usage=usage,
         )
 
     # ------------------------------------------------------------------
@@ -594,3 +670,88 @@ def _strip_artifacts(text: str) -> str:
     )
     text = THOUGHT_RE.sub("", text)
     return text.strip()
+
+
+def _extract_reasoning(text: str) -> str:
+    if not text:
+        return ""
+    parts = [m.group(1).strip() for m in THOUGHT_RE.finditer(text) if m.group(1).strip()]
+    return "\n\n".join(parts)
+
+
+def _estimate_tokens(text: str) -> int:
+    if not text:
+        return 0
+    # Rough char→token heuristic used when the provider omits usage.
+    return max(1, len(text) // 4)
+
+
+def _usage_from_response(
+    data: dict[str, Any] | None,
+    *,
+    model: str,
+    completion_text: str = "",
+    duration_ms: float = 0.0,
+) -> BrainUsage:
+    """Normalize OpenAI `usage`, llama.cpp `timings`, or estimate locally."""
+    data = data or {}
+    usage_raw = data.get("usage") or {}
+    timings = data.get("timings") or {}
+
+    prompt_n = int(
+        usage_raw.get("prompt_tokens")
+        or usage_raw.get("input_tokens")
+        or timings.get("prompt_n")
+        or usage_raw.get("prompt_eval_count")
+        or 0
+    )
+    completion_n = int(
+        usage_raw.get("completion_tokens")
+        or usage_raw.get("output_tokens")
+        or timings.get("predicted_n")
+        or usage_raw.get("eval_count")
+        or 0
+    )
+    total_n = int(usage_raw.get("total_tokens") or (prompt_n + completion_n) or 0)
+    cache_n = int(
+        timings.get("cache_n")
+        or usage_raw.get("prompt_tokens_details", {}).get("cached_tokens")
+        or 0
+    )
+
+    pred_ms = float(timings.get("predicted_ms") or 0.0)
+    prompt_ms = float(timings.get("prompt_ms") or 0.0)
+    if duration_ms <= 0 and (pred_ms or prompt_ms):
+        duration_ms = pred_ms + prompt_ms
+
+    tps = float(timings.get("predicted_per_second") or 0.0)
+    pps = float(timings.get("prompt_per_second") or 0.0)
+    if tps <= 0 and completion_n and duration_ms > 0:
+        # Prefer decode-only ms when available.
+        decode_ms = pred_ms if pred_ms > 0 else duration_ms
+        tps = completion_n / (decode_ms / 1000.0) if decode_ms > 0 else 0.0
+    if pps <= 0 and prompt_n and prompt_ms > 0:
+        pps = prompt_n / (prompt_ms / 1000.0)
+
+    if completion_n <= 0 and completion_text:
+        completion_n = _estimate_tokens(completion_text)
+        if total_n <= 0:
+            total_n = prompt_n + completion_n
+        if tps <= 0 and duration_ms > 0:
+            tps = completion_n / (duration_ms / 1000.0)
+
+    context_used = prompt_n + cache_n + completion_n
+    if context_used <= 0:
+        context_used = total_n
+
+    return BrainUsage(
+        prompt_tokens=prompt_n,
+        completion_tokens=completion_n,
+        total_tokens=total_n or (prompt_n + completion_n),
+        duration_ms=duration_ms,
+        tokens_per_second=tps,
+        prompt_per_second=pps,
+        cache_tokens=cache_n,
+        context_used=context_used,
+        model=model or str(data.get("model") or ""),
+    )

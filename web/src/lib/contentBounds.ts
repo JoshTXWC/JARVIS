@@ -1,13 +1,13 @@
 /**
- * Floating panels live inside the main content stage:
- *   viewport − header − footer − side pad (px-2 = 8).
+ * Floating panels live on the main canvas around the centered orb.
+ * Left strip is reserved for the side dock.
  */
-export const EDGE_PAD = 8;       // px-2 side padding
-export const HEADER_H = 72;      // brand + icon dock
-/** Slim strip for floating chrome controls. */
-export const FOOTER_H = 44;
-/** Top strip where releasing a tile docks it back into the icon menu. */
-export const DOCK_ZONE_H = 88;
+export const EDGE_PAD = 12;
+export const DOCK_W = 68;
+export const HEADER_H = 12;
+export const FOOTER_H = 12;
+/** Left dock strip — releasing a tile here docks it. */
+export const DOCK_ZONE_W = 88;
 
 export interface Bounds {
   left: number;
@@ -21,22 +21,22 @@ export function contentBounds(
   vh = typeof window !== "undefined" ? window.innerHeight : 900,
 ): Bounds {
   return {
-    left: EDGE_PAD,
-    top: HEADER_H + 2,
+    left: DOCK_W + EDGE_PAD,
+    top: HEADER_H,
     right: vw - EDGE_PAD,
-    bottom: vh - FOOTER_H - 2,
+    bottom: vh - FOOTER_H,
   };
 }
 
-/** True when the pointer is in the top dock strip or over the icon dock itself. */
+/** True when pointer is over the side dock strip or the dock element itself. */
 export function inDockZone(clientY: number, clientX?: number): boolean {
-  if (clientY <= DOCK_ZONE_H) return true;
+  if (typeof clientX === "number" && clientX <= DOCK_ZONE_W) return true;
   const dock = typeof document !== "undefined"
     ? document.getElementById("jarvis-icon-dock")
     : null;
   if (!dock || clientX == null) return false;
   const r = dock.getBoundingClientRect();
-  const pad = 16;
+  const pad = 20;
   return (
     clientX >= r.left - pad &&
     clientX <= r.right + pad &&

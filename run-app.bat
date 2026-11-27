@@ -17,7 +17,7 @@ if not exist "%ROOT%venv\Scripts\activate.bat" goto :no_venv
 call :log "venv OK"
 
 if not exist "%ROOT%electron\node_modules" goto :npm_install
-goto :launch
+goto :web_build_check
 
 :npm_install
 call :log "node_modules missing - running npm install (first time, ~30s)..."
@@ -31,6 +31,36 @@ set _ERR=!errorlevel!
 popd
 if not !_ERR! == 0 goto :npm_failed
 call :log "npm install OK"
+
+:web_build_check
+REM Electron serves jarvis from web\dist — rebuild when missing or stale vs src.
+if not exist "%ROOT%web\dist\index.html" goto :web_build
+if /I "%JARVIS_FORCE_WEB_BUILD%"=="1" goto :web_build
+powershell -NoProfile -Command ^
+  "$dist=Get-Item -LiteralPath '%ROOT%web\dist\index.html' -ErrorAction SilentlyContinue; if(-not $dist){exit 2}; $newest=Get-ChildItem -LiteralPath '%ROOT%web\src','%ROOT%web\public' -Recurse -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1; if($newest -and $newest.LastWriteTime -gt $dist.LastWriteTime){exit 3}; exit 0" >> "%LOG%" 2>&1
+if errorlevel 3 goto :web_build
+if errorlevel 2 goto :web_build
+call :log "web\dist is up to date"
+goto :launch
+
+:web_build
+call :log "Building web frontend (web\dist)..."
+echo.
+echo  Building web UI (needed for Electron)...
+echo.
+if not exist "%ROOT%web\node_modules" (
+  pushd "%ROOT%web"
+  call npm install >> "%LOG%" 2>&1
+  set _ERR=!errorlevel!
+  popd
+  if not !_ERR! == 0 goto :web_build_failed
+)
+pushd "%ROOT%web"
+call npm run build >> "%LOG%" 2>&1
+set _ERR=!errorlevel!
+popd
+if not !_ERR! == 0 goto :web_build_failed
+call :log "web build OK"
 
 :launch
 call :log "Launching Electron (npm start)..."
@@ -77,6 +107,15 @@ exit /b 1
 call :log "[ERROR] npm install failed exit code !_ERR!"
 echo.
 echo  npm install failed. See full log: %LOG%
+echo.
+pause
+exit /b 1
+
+:web_build_failed
+call :log "[ERROR] web build failed exit code !_ERR!"
+echo.
+echo  Web UI build failed. See full log: %LOG%
+echo  Or run manually:  cd web ^&^& npm run build
 echo.
 pause
 exit /b 1

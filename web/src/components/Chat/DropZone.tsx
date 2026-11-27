@@ -9,6 +9,7 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useState } from "react";
 import { useStore, type ChatAttachment } from "../../lib/store";
+import { apiFetch } from "../../lib/session";
 
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024; // 8 MB inline cap
 
@@ -68,7 +69,7 @@ export default function DropZone() {
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
-          className="fixed inset-0 z-[300] pointer-events-none flex items-center justify-center bg-jarvis-ink/70 backdrop-blur-sm"
+          className="fixed inset-0 z-[300] pointer-events-none flex items-center justify-center bg-jarvis-ink/75"
         >
           <div className="holo-panel p-8 text-center relative">
             <div className="text-display text-jarvis-aqua text-2xl tracking-widest glow-text mb-3">
@@ -111,7 +112,7 @@ async function handleFile(f: File, add: (a: ChatAttachment) => void) {
   const form = new FormData();
   form.append("file", f);
   try {
-    const resp = await fetch("/api/upload", { method: "POST", body: form });
+    const resp = await apiFetch("/api/upload", { method: "POST", body: form });
     const data = await resp.json();
     if (data?.url) {
       add({

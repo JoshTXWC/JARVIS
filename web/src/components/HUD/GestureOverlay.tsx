@@ -3,16 +3,43 @@
  * Webcam = darkened full-bleed background under the HUD.
  * One circle per hand + landmark nodes.
  * Pinch=click · fist=drag · two hands=scale.
+ *
+ * Coordinate spaces are separated:
+ *   camera → preview (HUD skeleton) via cameraToPreview
+ *   camera → control → desktop via PrecisionController
  */
 import { useEffect, useRef } from "react";
+import {
+  packLandmarks,
+  publishHandsFrame,
+  requestDesktopOverlay,
+  sendDesktopInput,
+  setDesktopInjectArmed,
+} from "../../lib/hands/desktopBridge";
+import { cameraToPreview, edgeProximity } from "../../lib/hands/coords";
+import { handsDiagnostics } from "../../lib/hands/diagnostics";
+import { HandIdentityTracker } from "../../lib/hands/handIdentity";
+import {
+  createHandLandmarker,
+  FrameScheduler,
+  openCamera,
+} from "../../lib/hands/handsPipeline";
+import { OneEuroFilter2D } from "../../lib/hands/oneEuro";
+import {
+  normalizedPinch,
+  PrecisionController,
+  type ScreenRect,
+} from "../../lib/hands/precisionControl";
+import {
+  loadTrackingSettings,
+  type TrackingQualitySettings,
+} from "../../lib/hands/trackingSettings";
 import { useStore } from "../../lib/store";
 
-const PINCH_THRESHOLD = 0.05;
-/** Detect every animation frame for snappy tracking. */
-const DETECT_MS = 0;
+/** Backup tick while the HUD is occluded — Chromium can still starve RAF. */
+const HIDDEN_DETECT_MS = 33;
 const STATUS_MS = 500;
-/** 1 = raw fingertip (lowest cursor lag). */
-const FOLLOW = 1;
+const DIAG_EMIT_MS = 250;
 
 const CONNECTIONS: Array<[number, number]> = [
   [0, 1], [1, 2], [2, 3], [3, 4],
@@ -26,9 +53,7 @@ const CONNECTIONS: Array<[number, number]> = [
 type Pt = { x: number; y: number };
 
 function dist(a: Pt, b: Pt): number {
-  const dx = a.x - b.x;
-  const dy = a.y - b.y;
-  return Math.sqrt(dx * dx + dy * dy);
+  return Math.hypot(a.x - b.x, a.y - b.y);
 }
 
 function isFingerFolded(
@@ -42,37 +67,13 @@ function isFingerFolded(
   return dist(tip, wrist) < dist(mcp, wrist);
 }
 
-/**
- * Map a MediaPipe landmark onto the screen, matching the mirrored
- * object-cover video so the cursor sits on the visible hand.
- */
-function mapLandmark(
-  p: Pt,
-  videoW: number,
-  videoH: number,
-  screenW: number,
-  screenH: number,
-): Pt {
-  if (videoW <= 0 || videoH <= 0) {
-    return { x: (1 - p.x) * screenW, y: p.y * screenH };
-  }
-  const scale = Math.max(screenW / videoW, screenH / videoH);
-  const dispW = videoW * scale;
-  const dispH = videoH * scale;
-  const offsetX = (screenW - dispW) / 2;
-  const offsetY = (screenH - dispH) / 2;
-  // Video CSS uses scaleX(-1) — mirror X to match what you see.
-  return {
-    x: offsetX + (1 - p.x) * dispW,
-    y: offsetY + p.y * dispH,
-  };
-}
-
 function handLabel(
   landmarks: Array<{ x: number; y: number; z: number }>,
+  pinchActivate = 0.28,
 ): "pinch" | "fist" | "open" {
-  const pinch = dist(landmarks[8], landmarks[4]) < PINCH_THRESHOLD;
-  if (pinch) return "pinch";
+  if (landmarks.length >= 21 && normalizedPinch(landmarks) <= pinchActivate) {
+    return "pinch";
+  }
   const fist =
     isFingerFolded(landmarks, 8, 5) &&
     isFingerFolded(landmarks, 12, 9) &&
@@ -88,9 +89,13 @@ function drawHandNodes(
   videoH: number,
   sw: number,
   sh: number,
+  quality: number,
 ) {
-  const pts = landmarks.map((p) => mapLandmark(p, videoW, videoH, sw, sh));
-  ctx.strokeStyle = "rgba(34,211,238,0.55)";
+  const pts = landmarks.map((p) =>
+    cameraToPreview(p.x, p.y, videoW, videoH, sw, sh, true),
+  );
+  const edgeFade = 0.35 + quality * 0.65;
+  ctx.strokeStyle = `rgba(34,211,238,${0.55 * edgeFade})`;
   ctx.lineWidth = 2;
   ctx.lineCap = "round";
   for (const [a, b] of CONNECTIONS) {
@@ -107,8 +112,8 @@ function drawHandNodes(
     const tip = i === 4 || i === 8 || i === 12 || i === 16 || i === 20;
     ctx.beginPath();
     ctx.fillStyle = tip
-      ? "rgba(224,242,254,0.95)"
-      : "rgba(125,211,252,0.9)";
+      ? `rgba(224,242,254,${0.95 * edgeFade})`
+      : `rgba(125,211,252,${0.9 * edgeFade})`;
     ctx.arc(M.x, M.y, tip ? 4.5 : 3.2, 0, Math.PI * 2);
     ctx.fill();
   }
@@ -119,25 +124,56 @@ export default function GestureOverlay() {
   const showCam = useStore((s) => s.handsShowCam);
   const setHandsShowCam = useStore((s) => s.setHandsShowCam);
   const setGestureStatus = useStore((s) => s.setGestureStatus);
+  const desktopControlEnabled = useStore((s) => s.desktopControlEnabled);
+  const desktopControlMode = useStore((s) => s.desktopControlMode);
+  const desktopOverlayEnabled = useStore((s) => s.desktopOverlayEnabled);
+  const desktopPaused = useStore((s) => s.desktopPaused);
+  const setDesktopGesture = useStore((s) => s.setDesktopGesture);
   const videoRef = useRef<HTMLVideoElement>(null);
   const cloudRef = useRef<HTMLCanvasElement>(null);
   const circleRefs = useRef<[HTMLDivElement | null, HTMLDivElement | null]>([null, null]);
   const landmarkerRef = useRef<any>(null);
-  const rafRef = useRef(0);
-  const lastDetectRef = useRef(0);
+  const schedulerRef = useRef<FrameScheduler | null>(null);
+  const processFrameRef = useRef<((now: number) => void) | null>(null);
+  const hiddenTimerRef = useRef(0);
   const lastStatusRef = useRef(0);
+  const lastDiagRef = useRef(0);
   const lastPinchRef = useRef([false, false]);
   const dragIdRef = useRef<string | null>(null);
   const lastCursorRef = useRef<Pt>({ x: 0, y: 0 });
-  const smoothRef = useRef<[Pt | null, Pt | null]>([null, null]);
+  /** Last open index-tip per hand — HUD cursor freezes here during pinch. */
+  const openTipRef = useRef<[Pt | null, Pt | null]>([null, null]);
+  const vizFiltersRef = useRef<[OneEuroFilter2D, OneEuroFilter2D]>([
+    new OneEuroFilter2D(),
+    new OneEuroFilter2D(),
+  ]);
   const scaleIdRef = useRef<string | null>(null);
   const scaleBaseDistRef = useRef(0);
   const scaleBaseBoxRef = useRef<{ w: number; h: number } | null>(null);
+  const precisionRef = useRef(new PrecisionController());
+  const identityRef = useRef(new HandIdentityTracker());
+  const trackingRef = useRef<TrackingQualitySettings>(loadTrackingSettings());
+  const screenRef = useRef<ScreenRect>({ x: 0, y: 0, width: 1920, height: 1080 });
+  const desktopInjectRef = useRef(false);
+  const desktopControlEnabledRef = useRef(desktopControlEnabled);
+  const desktopOverlayEnabledRef = useRef(desktopOverlayEnabled);
+  const desktopModeRef = useRef(desktopControlMode);
+  const desktopPausedRef = useRef(desktopPaused);
+  desktopControlEnabledRef.current = desktopControlEnabled;
+  desktopOverlayEnabledRef.current = desktopOverlayEnabled;
+  desktopModeRef.current = desktopControlMode;
+  desktopPausedRef.current = desktopPaused;
+  desktopInjectRef.current =
+    desktopControlEnabled &&
+    !desktopPaused &&
+    (desktopControlMode === "precision" || desktopControlMode === "spatial");
 
   useEffect(() => {
     if (!enabled) {
       stop();
       setGestureStatus("");
+      requestDesktopOverlay(false);
+      window.jarvis?.send?.("jarvis:hands-active", false);
       try {
         delete document.body.dataset.jarvisHands;
       } catch { /* noop */ }
@@ -146,44 +182,45 @@ export default function GestureOverlay() {
     try {
       document.body.dataset.jarvisHands = "1";
     } catch { /* noop */ }
+    window.jarvis?.send?.("jarvis:hands-active", true);
 
     let cancelled = false;
+    const scheduler = new FrameScheduler();
+    schedulerRef.current = scheduler;
+
+    const onTrackingSettings = (e: Event) => {
+      const detail = (e as CustomEvent).detail as TrackingQualitySettings | undefined;
+      if (!detail) return;
+      trackingRef.current = detail;
+      precisionRef.current.configure(detail);
+      vizFiltersRef.current[0].setParams(detail.vizFilter);
+      vizFiltersRef.current[1].setParams(detail.vizFilter);
+    };
+    window.addEventListener("jarvis:tracking-settings", onTrackingSettings);
 
     const boot = async () => {
       try {
         setGestureStatus("hands loading…");
-        const visionMod = await import(
-          /* @vite-ignore */
-          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/+esm"
-        );
-        const { FilesetResolver, HandLandmarker } = visionMod as {
-          FilesetResolver: any;
-          HandLandmarker: any;
-        };
-        const vision = await FilesetResolver.forVisionTasks(
-          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm",
-        );
-        landmarkerRef.current = await HandLandmarker.createFromOptions(vision, {
-          baseOptions: {
-            modelAssetPath: "/hand_landmarker.task",
-            delegate: "GPU",
-          },
-          runningMode: "VIDEO",
-          numHands: 2,
-          minHandDetectionConfidence: 0.45,
-          minHandPresenceConfidence: 0.45,
-          minTrackingConfidence: 0.45,
-        });
-        if (cancelled) return;
+        const tracking = loadTrackingSettings();
+        trackingRef.current = tracking;
+        precisionRef.current.configure(tracking);
+        vizFiltersRef.current[0].setParams(tracking.vizFilter);
+        vizFiltersRef.current[1].setParams(tracking.vizFilter);
 
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
-            frameRate: { ideal: 60, max: 60 },
-            facingMode: "user",
-          },
-          audio: false,
+        const { landmarker, delegate } = await createHandLandmarker({
+          confidence: tracking.confidenceMin,
+        });
+        if (cancelled) {
+          landmarker.close?.();
+          return;
+        }
+        landmarkerRef.current = landmarker;
+
+        const stream = await openCamera({
+          deviceId: tracking.cameraDeviceId || undefined,
+          width: tracking.captureWidth,
+          height: tracking.captureHeight,
+          fps: tracking.captureFps,
         });
         if (cancelled) {
           stream.getTracks().forEach((t) => t.stop());
@@ -193,8 +230,409 @@ export default function GestureOverlay() {
         if (!video) return;
         video.srcObject = stream;
         await video.play();
-        setGestureStatus("hands · pinch=click · fist=drag · 2 hands=scale");
-        tick();
+
+        const track = stream.getVideoTracks()[0];
+        const settings = track?.getSettings?.() || {};
+        handsDiagnostics.setMeta({
+          delegate,
+          resolution: `${settings.width || tracking.captureWidth}×${settings.height || tracking.captureHeight}`,
+          cameraLabel: track?.label || "camera",
+        });
+
+        setGestureStatus("hands · tip cursor · pinch lock · hold-drag · fist=window");
+
+        const processFrame = (now: number) => {
+          const videoEl = videoRef.current;
+          const cloud = cloudRef.current;
+          const lm = landmarkerRef.current;
+          if (!videoEl || !lm || videoEl.readyState < 2) return;
+
+          handsDiagnostics.markCameraFrame(now);
+
+          const videoW = videoEl.videoWidth || 1280;
+          const videoH = videoEl.videoHeight || 720;
+          const sw = window.innerWidth;
+          const sh = window.innerHeight;
+
+          if (cloud) {
+            if (cloud.width !== sw || cloud.height !== sh) {
+              cloud.width = sw;
+              cloud.height = sh;
+            }
+          }
+
+          const t0 = performance.now();
+          let result: any;
+          try {
+            result = lm.detectForVideo(videoEl, now);
+          } catch {
+            handsDiagnostics.markDropped();
+            return;
+          }
+          const t1 = performance.now();
+
+          const hands = (result?.landmarks || []) as Array<
+            Array<{ x: number; y: number; z: number }>
+          >;
+          const handednessLabels: string[] = (result?.handednesses || []).map(
+            (h: any) => h?.[0]?.categoryName || h?.[0]?.displayName || "",
+          );
+          const scores: number[] = (result?.handednesses || []).map(
+            (h: any) => h?.[0]?.score ?? 1,
+          );
+
+          const slots = identityRef.current.update(
+            hands,
+            handednessLabels,
+            scores,
+            trackingRef.current.primaryHand,
+          );
+          if (slots.remapped) {
+            precisionRef.current.onHandIdentityChange();
+          }
+
+          const orderedHands: typeof hands = [];
+          if (slots.dominant) orderedHands.push(slots.dominant.landmarks as any);
+          if (slots.secondary) orderedHands.push(slots.secondary.landmarks as any);
+
+          const qualities = orderedHands.map((h) => {
+            const tip8 = h[8];
+            return 1 - edgeProximity(tip8.x, tip8.y, 0.1);
+          });
+
+          const cctx = cloud?.getContext("2d", { alpha: true });
+          if (cctx && cloud) {
+            cctx.clearRect(0, 0, cloud.width, cloud.height);
+            for (let i = 0; i < orderedHands.length; i++) {
+              drawHandNodes(
+                cctx,
+                orderedHands[i],
+                videoW,
+                videoH,
+                sw,
+                sh,
+                qualities[i] ?? 1,
+              );
+            }
+          }
+
+          const primary: {
+            mode: "pinch" | "fist" | "open";
+            tip: Pt;
+          }[] = [];
+          const tracking = trackingRef.current;
+
+          for (let i = 0; i < Math.min(2, orderedHands.length); i++) {
+            const landmarks = orderedHands[i];
+            const mode = handLabel(landmarks, tracking.pinchActivate);
+            const raw = cameraToPreview(
+              landmarks[8].x,
+              landmarks[8].y,
+              videoW,
+              videoH,
+              sw,
+              sh,
+              true,
+            );
+            // Separate viz filter — does not drive desktop cursor.
+            const liveTip = vizFiltersRef.current[i].filter(raw.x, raw.y, now);
+            const pinchNorm =
+              landmarks.length >= 21 ? normalizedPinch(landmarks) : 1;
+            const closing = pinchNorm <= tracking.pinchApproach;
+
+            // Cursor stays on index tip while open; freeze at that tip for pinch/click.
+            let tip = liveTip;
+            if (mode === "fist") {
+              openTipRef.current[i] = { x: liveTip.x, y: liveTip.y };
+              tip = liveTip;
+            } else if (closing || mode === "pinch") {
+              tip = openTipRef.current[i] ?? liveTip;
+              if (!openTipRef.current[i]) {
+                openTipRef.current[i] = { x: tip.x, y: tip.y };
+              }
+            } else {
+              openTipRef.current[i] = { x: liveTip.x, y: liveTip.y };
+              tip = liveTip;
+            }
+
+            primary.push({ mode, tip });
+            paintCircle(i, tip, mode);
+          }
+          for (let i = orderedHands.length; i < 2; i++) {
+            vizFiltersRef.current[i].reset();
+            openTipRef.current[i] = null;
+            paintCircle(i, null, null);
+          }
+
+          const controlArmed =
+            desktopControlEnabledRef.current &&
+            !desktopPausedRef.current &&
+            (desktopModeRef.current === "precision" ||
+              desktopModeRef.current === "spatial");
+          let controlPose: string | null = null;
+          let controlCursor: {
+            phase: string;
+            u: number;
+            v: number;
+            approach: number;
+            hold: number;
+          } | null = null;
+
+          let cursorForDiag: Pt | undefined;
+          if (controlArmed) {
+            const controlLm = slots.dominant?.landmarks || null;
+            const { ops, pose, viz, cursor } = precisionRef.current.frame(
+              controlLm,
+              screenRef.current,
+              now,
+            );
+            for (const op of ops) sendDesktopInput(op);
+            controlPose = pose;
+            controlCursor = viz;
+            cursorForDiag = cursor ?? undefined;
+            setDesktopGesture(pose);
+          } else if (primary[0]) {
+            setDesktopGesture(primary[0].mode);
+          } else {
+            setDesktopGesture(hands.length ? "track" : "seeking");
+          }
+
+          const avgQ =
+            qualities.length > 0
+              ? qualities.reduce((a, b) => a + b, 0) / qualities.length
+              : 0;
+          handsDiagnostics.markInference(t0, t1, avgQ, cursorForDiag);
+
+          if (now - lastDiagRef.current >= DIAG_EMIT_MS) {
+            lastDiagRef.current = now;
+            window.dispatchEvent(
+              new CustomEvent("jarvis:hands-diagnostics", {
+                detail: handsDiagnostics.snapshot(),
+              }),
+            );
+          }
+
+          const framePayload = {
+            t: now,
+            hands: packLandmarks(orderedHands),
+            lost: orderedHands.length === 0,
+            poses: controlPose
+              ? [controlPose, ...primary.slice(1).map((p) => p.mode)]
+              : primary.map((p) => p.mode),
+            cursor: controlCursor,
+            videoW,
+            videoH,
+            dominantIndex: 0,
+            qualities,
+          };
+          publishHandsFrame(framePayload, {
+            overlay: true,
+            inject: desktopControlEnabledRef.current,
+          });
+          // Local event for calibration wizard (camera-space landmarks).
+          window.dispatchEvent(
+            new CustomEvent("jarvis:hands-frame-local", { detail: framePayload }),
+          );
+
+          if (primary[0]) {
+            window.dispatchEvent(
+              new CustomEvent("jarvis:hands-pointer", {
+                detail: {
+                  x: primary[0].tip.x,
+                  y: primary[0].tip.y,
+                  mode: primary[0].mode,
+                  pinch: primary[0].mode === "pinch",
+                  pinch2: primary[1]?.mode === "pinch",
+                  fist: primary[0].mode === "fist",
+                  hands: primary.length,
+                  x2: primary[1]?.tip.x,
+                  y2: primary[1]?.tip.y,
+                },
+              }),
+            );
+          } else {
+            window.dispatchEvent(
+              new CustomEvent("jarvis:hands-pointer", {
+                detail: {
+                  x: -1, y: -1, mode: null, pinch: false, pinch2: false, fist: false, hands: 0,
+                },
+              }),
+            );
+          }
+
+          // —— HUD-only DOM gestures when not injecting OS input ——
+          if (desktopInjectRef.current) {
+            lastPinchRef.current[0] = primary[0]?.mode === "pinch";
+            if (dragIdRef.current) {
+              window.dispatchEvent(
+                new CustomEvent("jarvis:gesture-release", {
+                  detail: { id: dragIdRef.current, x: -1, y: -1 },
+                }),
+              );
+              dragIdRef.current = null;
+            }
+            if (scaleIdRef.current) {
+              window.dispatchEvent(
+                new CustomEvent("jarvis:gesture-release", {
+                  detail: { id: scaleIdRef.current },
+                }),
+              );
+              scaleIdRef.current = null;
+            }
+          } else if (primary[0]) {
+            const { tip, mode } = primary[0];
+            const pinchNow = mode === "pinch";
+            if (pinchNow && !lastPinchRef.current[0] && !dragIdRef.current) {
+              const st = useStore.getState();
+              const dockLocked =
+                st.dockHot || Date.now() < st.dockDropLockUntil;
+              const el = document.elementFromPoint(tip.x, tip.y) as HTMLElement | null;
+              const overDock = !!el?.closest("#jarvis-icon-dock");
+              if (!(dockLocked && overDock)) {
+                const clickable = el?.closest(
+                  "button, a, input, [role='button'], [data-floating-id], [data-reticle]",
+                ) as HTMLElement | null;
+                if (!(overDock && dockLocked) && clickable && typeof clickable.click === "function") {
+                  if (!(clickable.closest("#jarvis-icon-dock") && dockLocked)) {
+                    clickable.click();
+                  }
+                } else if (el && typeof (el as any).click === "function" && !overDock) {
+                  (el as any).click();
+                }
+                window.dispatchEvent(
+                  new CustomEvent("jarvis:hands-click", {
+                    detail: { x: tip.x, y: tip.y },
+                  }),
+                );
+              }
+            }
+            lastPinchRef.current[0] = pinchNow;
+
+            if (mode === "fist" && primary.length < 2) {
+              if (!dragIdRef.current) {
+                const hit = document
+                  .elementFromPoint(tip.x, tip.y)
+                  ?.closest("[data-floating-id]") as HTMLElement | null;
+                const id = hit?.getAttribute("data-floating-id");
+                if (id) {
+                  dragIdRef.current = id;
+                  lastCursorRef.current = tip;
+                  window.dispatchEvent(
+                    new CustomEvent("jarvis:gesture-grab", { detail: { id } }),
+                  );
+                }
+              } else {
+                const dx = tip.x - lastCursorRef.current.x;
+                const dy = tip.y - lastCursorRef.current.y;
+                if (Math.abs(dx) > 0.15 || Math.abs(dy) > 0.15) {
+                  window.dispatchEvent(
+                    new CustomEvent("jarvis:gesture-move", {
+                      detail: {
+                        id: dragIdRef.current,
+                        dx,
+                        dy,
+                        x: tip.x,
+                        y: tip.y,
+                      },
+                    }),
+                  );
+                  lastCursorRef.current = tip;
+                }
+              }
+            } else if (dragIdRef.current && primary.length < 2) {
+              window.dispatchEvent(
+                new CustomEvent("jarvis:gesture-release", {
+                  detail: {
+                    id: dragIdRef.current,
+                    x: tip.x,
+                    y: tip.y,
+                  },
+                }),
+              );
+              dragIdRef.current = null;
+            }
+          } else {
+            lastPinchRef.current[0] = false;
+            vizFiltersRef.current[0].reset();
+            if (dragIdRef.current) {
+              window.dispatchEvent(
+                new CustomEvent("jarvis:gesture-release", {
+                  detail: { id: dragIdRef.current, x: -1, y: -1 },
+                }),
+              );
+              dragIdRef.current = null;
+            }
+          }
+
+          if (!desktopInjectRef.current) {
+            if (primary.length >= 2) {
+              if (dragIdRef.current) {
+                window.dispatchEvent(
+                  new CustomEvent("jarvis:gesture-release", {
+                    detail: {
+                      id: dragIdRef.current,
+                      x: primary[0].tip.x,
+                      y: primary[0].tip.y,
+                    },
+                  }),
+                );
+                dragIdRef.current = null;
+              }
+              const d = dist(primary[0].tip, primary[1].tip);
+              if (!scaleIdRef.current) {
+                const mid = {
+                  x: (primary[0].tip.x + primary[1].tip.x) / 2,
+                  y: (primary[0].tip.y + primary[1].tip.y) / 2,
+                };
+                const hit = document
+                  .elementFromPoint(mid.x, mid.y)
+                  ?.closest("[data-floating-id]") as HTMLElement | null;
+                const id = hit?.getAttribute("data-floating-id");
+                if (id && d > 40) {
+                  scaleIdRef.current = id;
+                  scaleBaseDistRef.current = d;
+                  const rect = hit!.getBoundingClientRect();
+                  scaleBaseBoxRef.current = { w: rect.width, h: rect.height };
+                }
+              } else if (scaleBaseDistRef.current > 1 && scaleBaseBoxRef.current) {
+                const factor = Math.max(
+                  0.55,
+                  Math.min(2.4, d / scaleBaseDistRef.current),
+                );
+                window.dispatchEvent(
+                  new CustomEvent("jarvis:gesture-scale", {
+                    detail: {
+                      id: scaleIdRef.current,
+                      factor,
+                      baseW: scaleBaseBoxRef.current.w,
+                      baseH: scaleBaseBoxRef.current.h,
+                    },
+                  }),
+                );
+              }
+            } else if (scaleIdRef.current) {
+              window.dispatchEvent(
+                new CustomEvent("jarvis:gesture-release", {
+                  detail: { id: scaleIdRef.current },
+                }),
+              );
+              scaleIdRef.current = null;
+              scaleBaseDistRef.current = 0;
+              scaleBaseBoxRef.current = null;
+            }
+          }
+
+          if (now - lastStatusRef.current > STATUS_MS) {
+            lastStatusRef.current = now;
+            const modes = primary.map((p) => p.mode).join("+") || "—";
+            setGestureStatus(
+              `hands · ${primary.length} · ${modes} · pinch=click · fist=drag · 2=scale`,
+            );
+          }
+        };
+
+        processFrameRef.current = processFrame;
+        scheduler.start(video, (now) => processFrame(now));
       } catch (e: any) {
         console.error("[hands]", e);
         setGestureStatus(`hands failed: ${e?.message || e}`);
@@ -213,281 +651,114 @@ export default function GestureOverlay() {
         return;
       }
       el.style.opacity = "1";
-      el.style.transform = `translate3d(${pos.x}px, ${pos.y}px, 0) translate(-50%, -50%)`;
+      const scale = mode === "pinch" ? 1.2 : 1;
+      el.style.transform = `translate3d(${pos.x}px, ${pos.y}px, 0) translate(-50%, -50%) scale(${scale})`;
       el.dataset.mode = mode;
     };
 
-    const smoothToward = (idx: number, target: Pt): Pt => {
-      const prev = smoothRef.current[idx];
-      if (!prev) {
-        smoothRef.current[idx] = { ...target };
-        return target;
-      }
-      const next = {
-        x: prev.x + (target.x - prev.x) * FOLLOW,
-        y: prev.y + (target.y - prev.y) * FOLLOW,
-      };
-      smoothRef.current[idx] = next;
-      return next;
-    };
-
-    const tick = () => {
+    // When the HUD is occluded, rVFC may stall — pause scheduler, use interval only.
+    const onVis = () => {
       const video = videoRef.current;
-      const cloud = cloudRef.current;
-      const lm = landmarkerRef.current;
-      const now = performance.now();
-      if (!video || !lm || video.readyState < 2) {
-        rafRef.current = requestAnimationFrame(tick);
-        return;
-      }
-
-      if (now - lastDetectRef.current >= DETECT_MS) {
-        lastDetectRef.current = now;
-        const videoW = video.videoWidth || 1280;
-        const videoH = video.videoHeight || 720;
-        const sw = window.innerWidth;
-        const sh = window.innerHeight;
-
-        if (cloud) {
-          if (cloud.width !== sw || cloud.height !== sh) {
-            cloud.width = sw;
-            cloud.height = sh;
-          }
+      if (document.hidden) {
+        schedulerRef.current?.stop();
+        if (!hiddenTimerRef.current) {
+          hiddenTimerRef.current = window.setInterval(() => {
+            processFrameRef.current?.(performance.now());
+          }, HIDDEN_DETECT_MS);
         }
-
-        let result: any;
-        try {
-          result = lm.detectForVideo(video, now);
-        } catch {
-          rafRef.current = requestAnimationFrame(tick);
-          return;
+      } else {
+        if (hiddenTimerRef.current) {
+          window.clearInterval(hiddenTimerRef.current);
+          hiddenTimerRef.current = 0;
         }
-
-        const hands = (result?.landmarks || []) as Array<
-          Array<{ x: number; y: number; z: number }>
-        >;
-
-        const cctx = cloud?.getContext("2d");
-        if (cctx && cloud) {
-          cctx.clearRect(0, 0, cloud.width, cloud.height);
-          for (const landmarks of hands) {
-            drawHandNodes(cctx, landmarks, videoW, videoH, sw, sh);
-          }
-        }
-
-        const primary: {
-          mode: "pinch" | "fist" | "open";
-          tip: Pt;
-        }[] = [];
-
-        for (let i = 0; i < Math.min(2, hands.length); i++) {
-          const landmarks = hands[i];
-          const mode = handLabel(landmarks);
-          const raw = mapLandmark(landmarks[8], videoW, videoH, sw, sh);
-          const tip = smoothToward(i, raw);
-          primary.push({ mode, tip });
-          paintCircle(i, tip, mode);
-        }
-        for (let i = hands.length; i < 2; i++) {
-          smoothRef.current[i] = null;
-          paintCircle(i, null, null);
-        }
-
-        // Broadcast index-finger cursor for Neural + any listeners (raw, no lag).
-        if (primary[0]) {
-          window.dispatchEvent(
-            new CustomEvent("jarvis:hands-pointer", {
-              detail: {
-                x: primary[0].tip.x,
-                y: primary[0].tip.y,
-                mode: primary[0].mode,
-                pinch: primary[0].mode === "pinch",
-                pinch2: primary[1]?.mode === "pinch",
-                fist: primary[0].mode === "fist",
-                hands: primary.length,
-                x2: primary[1]?.tip.x,
-                y2: primary[1]?.tip.y,
-              },
-            }),
-          );
-        } else {
-          window.dispatchEvent(
-            new CustomEvent("jarvis:hands-pointer", {
-              detail: {
-                x: -1, y: -1, mode: null, pinch: false, pinch2: false, fist: false, hands: 0,
-              },
-            }),
-          );
-        }
-
-        // —— One-hand cursor actions (hand 0) ——
-        if (primary[0]) {
-          const { tip, mode } = primary[0];
-          const pinchNow = mode === "pinch";
-          // Index finger = cursor: pinch selects like a click (never while dragging a tile,
-          // and never on dock icons during / right after a dock drop).
-          if (pinchNow && !lastPinchRef.current[0] && !dragIdRef.current) {
-            const st = useStore.getState();
-            const dockLocked =
-              st.dockHot || Date.now() < st.dockDropLockUntil;
-            const el = document.elementFromPoint(tip.x, tip.y) as HTMLElement | null;
-            const overDock = !!el?.closest("#jarvis-icon-dock");
-            if (!(dockLocked && overDock)) {
-              const clickable = el?.closest(
-                "button, a, input, [role='button'], [data-floating-id], [data-reticle]",
-              ) as HTMLElement | null;
-              if (!(overDock && dockLocked) && clickable && typeof clickable.click === "function") {
-                if (!(clickable.closest("#jarvis-icon-dock") && dockLocked)) {
-                  clickable.click();
-                }
-              } else if (el && typeof (el as any).click === "function" && !overDock) {
-                (el as any).click();
-              }
-              window.dispatchEvent(
-                new CustomEvent("jarvis:hands-click", {
-                  detail: { x: tip.x, y: tip.y },
-                }),
-              );
-            }
-          }
-          lastPinchRef.current[0] = pinchNow;
-
-          if (mode === "fist" && primary.length < 2) {
-            if (!dragIdRef.current) {
-              const hit = document
-                .elementFromPoint(tip.x, tip.y)
-                ?.closest("[data-floating-id]") as HTMLElement | null;
-              const id = hit?.getAttribute("data-floating-id");
-              if (id) {
-                dragIdRef.current = id;
-                lastCursorRef.current = tip;
-                window.dispatchEvent(
-                  new CustomEvent("jarvis:gesture-grab", { detail: { id } }),
-                );
-              }
-            } else {
-              const dx = tip.x - lastCursorRef.current.x;
-              const dy = tip.y - lastCursorRef.current.y;
-              if (Math.abs(dx) > 0.15 || Math.abs(dy) > 0.15) {
-                window.dispatchEvent(
-                  new CustomEvent("jarvis:gesture-move", {
-                    detail: {
-                      id: dragIdRef.current,
-                      dx,
-                      dy,
-                      x: tip.x,
-                      y: tip.y,
-                    },
-                  }),
-                );
-                lastCursorRef.current = tip;
-              }
-            }
-          } else if (dragIdRef.current && primary.length < 2) {
-            window.dispatchEvent(
-              new CustomEvent("jarvis:gesture-release", {
-                detail: {
-                  id: dragIdRef.current,
-                  x: tip.x,
-                  y: tip.y,
-                },
-              }),
-            );
-            dragIdRef.current = null;
-          }
-        } else {
-          lastPinchRef.current[0] = false;
-          smoothRef.current[0] = null;
-          if (dragIdRef.current) {
-            window.dispatchEvent(
-              new CustomEvent("jarvis:gesture-release", {
-                detail: { id: dragIdRef.current, x: -1, y: -1 },
-              }),
-            );
-            dragIdRef.current = null;
-          }
-        }
-
-        // —— Two-hand scale ——
-        if (primary.length >= 2) {
-          if (dragIdRef.current) {
-            window.dispatchEvent(
-              new CustomEvent("jarvis:gesture-release", {
-                detail: {
-                  id: dragIdRef.current,
-                  x: primary[0].tip.x,
-                  y: primary[0].tip.y,
-                },
-              }),
-            );
-            dragIdRef.current = null;
-          }
-          const d = dist(primary[0].tip, primary[1].tip);
-          if (!scaleIdRef.current) {
-            const mid = {
-              x: (primary[0].tip.x + primary[1].tip.x) / 2,
-              y: (primary[0].tip.y + primary[1].tip.y) / 2,
-            };
-            const hit = document
-              .elementFromPoint(mid.x, mid.y)
-              ?.closest("[data-floating-id]") as HTMLElement | null;
-            const id = hit?.getAttribute("data-floating-id");
-            if (id && d > 40) {
-              scaleIdRef.current = id;
-              scaleBaseDistRef.current = d;
-              const rect = hit!.getBoundingClientRect();
-              scaleBaseBoxRef.current = { w: rect.width, h: rect.height };
-            }
-          } else if (scaleBaseDistRef.current > 1 && scaleBaseBoxRef.current) {
-            const factor = Math.max(
-              0.55,
-              Math.min(2.4, d / scaleBaseDistRef.current),
-            );
-            window.dispatchEvent(
-              new CustomEvent("jarvis:gesture-scale", {
-                detail: {
-                  id: scaleIdRef.current,
-                  factor,
-                  baseW: scaleBaseBoxRef.current.w,
-                  baseH: scaleBaseBoxRef.current.h,
-                },
-              }),
-            );
-          }
-        } else if (scaleIdRef.current) {
-          window.dispatchEvent(
-            new CustomEvent("jarvis:gesture-release", {
-              detail: { id: scaleIdRef.current },
-            }),
-          );
-          scaleIdRef.current = null;
-          scaleBaseDistRef.current = 0;
-          scaleBaseBoxRef.current = null;
-        }
-
-        if (now - lastStatusRef.current > STATUS_MS) {
-          lastStatusRef.current = now;
-          const modes = primary.map((p) => p.mode).join("+") || "—";
-          setGestureStatus(
-            `hands · ${primary.length} · ${modes} · pinch=click · fist=drag · 2=scale`,
-          );
+        if (video && processFrameRef.current) {
+          const sched = new FrameScheduler();
+          schedulerRef.current = sched;
+          sched.start(video, (now) => processFrameRef.current?.(now));
         }
       }
-
-      rafRef.current = requestAnimationFrame(tick);
     };
+    document.addEventListener("visibilitychange", onVis);
+    onVis();
 
     void boot();
     return () => {
       cancelled = true;
+      window.removeEventListener("jarvis:tracking-settings", onTrackingSettings);
+      document.removeEventListener("visibilitychange", onVis);
       stop();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabled]);
 
+  useEffect(() => {
+    const want = enabled && desktopOverlayEnabled;
+    if (want) {
+      requestDesktopOverlay(true);
+      window.jarvis?.send?.("jarvis:desktop-overlay-meta", {
+        mode: desktopControlEnabled ? desktopControlMode : "hud",
+        viz_mode: useStore.getState().desktopVizMode,
+        paused: desktopPaused,
+      });
+    } else {
+      requestDesktopOverlay(false);
+    }
+  }, [
+    enabled,
+    desktopControlEnabled,
+    desktopOverlayEnabled,
+    desktopControlMode,
+    desktopPaused,
+  ]);
+
+  useEffect(() => {
+    const armed =
+      enabled &&
+      desktopControlEnabled &&
+      !desktopPaused &&
+      (desktopControlMode === "precision" || desktopControlMode === "spatial");
+    if (!armed) {
+      const drop = precisionRef.current.reset();
+      for (const op of drop) sendDesktopInput(op);
+      sendDesktopInput({ op: "release" });
+    }
+    setDesktopInjectArmed(armed);
+    if (armed && window.jarvis?.invoke) {
+      void window.jarvis.invoke("jarvis:virtual-screen").then((b: any) => {
+        if (b && b.width && b.height) {
+          screenRef.current = {
+            x: b.x || 0,
+            y: b.y || 0,
+            width: b.width,
+            height: b.height,
+          };
+        }
+      });
+    }
+    return () => {
+      if (armed) {
+        const drop = precisionRef.current.reset();
+        for (const op of drop) sendDesktopInput(op);
+        sendDesktopInput({ op: "release" });
+        setDesktopInjectArmed(false);
+      }
+    };
+  }, [enabled, desktopControlEnabled, desktopControlMode, desktopPaused]);
+
   function stop() {
-    if (rafRef.current) cancelAnimationFrame(rafRef.current);
-    rafRef.current = 0;
+    schedulerRef.current?.stop();
+    schedulerRef.current = null;
+    processFrameRef.current = null;
+    if (hiddenTimerRef.current) {
+      window.clearInterval(hiddenTimerRef.current);
+      hiddenTimerRef.current = 0;
+    }
+    window.jarvis?.send?.("jarvis:hands-active", false);
+    setDesktopInjectArmed(false);
+    sendDesktopInput({ op: "release" });
+    precisionRef.current.reset();
+    identityRef.current.reset();
+    handsDiagnostics.reset();
     const video = videoRef.current;
     const stream = video?.srcObject as MediaStream | null;
     stream?.getTracks().forEach((t) => t.stop());
@@ -498,7 +769,10 @@ export default function GestureOverlay() {
     landmarkerRef.current = null;
     dragIdRef.current = null;
     scaleIdRef.current = null;
-    smoothRef.current = [null, null];
+    vizFiltersRef.current[0].reset();
+    vizFiltersRef.current[1].reset();
+    openTipRef.current = [null, null];
+    requestDesktopOverlay(false);
     try {
       delete document.body.dataset.jarvisHands;
     } catch { /* noop */ }
@@ -508,7 +782,6 @@ export default function GestureOverlay() {
 
   return (
     <>
-      {/* Hidden video always runs for tracking; visible feed is optional */}
       <div
         className={`fixed inset-0 z-[1] pointer-events-none overflow-hidden transition-opacity duration-300 ${
           showCam ? "opacity-100" : "opacity-0"
@@ -536,7 +809,6 @@ export default function GestureOverlay() {
         )}
       </div>
 
-      {/* Landmark skeleton / nodes */}
       <canvas
         ref={cloudRef}
         className="fixed inset-0 z-[84] pointer-events-none w-full h-full"
@@ -548,7 +820,7 @@ export default function GestureOverlay() {
           ref={(el) => {
             circleRefs.current[i] = el;
           }}
-          className="hands-cursor fixed top-0 left-0 z-[86] pointer-events-none w-5 h-5 rounded-full opacity-0"
+          className="hands-cursor fixed top-0 left-0 z-[86] pointer-events-none w-3.5 h-3.5 rounded-full opacity-0"
           data-mode="open"
           style={{ willChange: "transform" }}
         />
@@ -565,17 +837,17 @@ export default function GestureOverlay() {
 
       <style>{`
         .hands-cursor {
-          border: 2px solid rgba(34, 211, 238, 0.85);
-          background: rgba(34, 211, 238, 0.12);
-          box-shadow: 0 0 14px rgba(34, 211, 238, 0.45);
+          border: none;
+          background: #3b9eff;
+          box-shadow: 0 0 10px rgba(59, 158, 255, 0.85), 0 0 2px rgba(255,255,255,0.9);
         }
         .hands-cursor[data-mode="pinch"] {
-          border-color: rgba(224, 242, 254, 0.95);
-          background: rgba(224, 242, 254, 0.35);
+          background: #e0f2fe;
+          box-shadow: 0 0 14px rgba(224, 242, 254, 1), 0 0 0 6px rgba(59, 158, 255, 0.35);
         }
         .hands-cursor[data-mode="fist"] {
-          border-color: rgba(252, 211, 77, 0.95);
-          background: rgba(252, 211, 77, 0.28);
+          background: #fbbf24;
+          box-shadow: 0 0 12px rgba(251, 191, 36, 0.9);
         }
       `}</style>
     </>

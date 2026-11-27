@@ -1,7 +1,28 @@
-import { nextId, useStore } from "./store";
+import { nextId, useStore, type ChatEntry, type ChatUsage } from "./store";
+import { ensureSession, wsUrlWithSession } from "./session";
 import { speak } from "./voice";
 
 type WSMessage = Record<string, any>;
+
+function chatMetaFromPayload(m: WSMessage): Partial<ChatEntry> {
+  const usage: ChatUsage = {};
+  const num = (k: string) => (typeof m[k] === "number" ? m[k] : undefined);
+  if (num("prompt_tokens") != null) usage.prompt_tokens = num("prompt_tokens");
+  if (num("completion_tokens") != null) usage.completion_tokens = num("completion_tokens");
+  if (num("total_tokens") != null) usage.total_tokens = num("total_tokens");
+  if (num("duration_ms") != null) usage.duration_ms = num("duration_ms");
+  if (num("tokens_per_second") != null) usage.tokens_per_second = num("tokens_per_second");
+  if (num("prompt_per_second") != null) usage.prompt_per_second = num("prompt_per_second");
+  if (num("cache_tokens") != null) usage.cache_tokens = num("cache_tokens");
+  if (num("context_used") != null) usage.context_used = num("context_used");
+  if (typeof m.model === "string" && m.model) usage.model = m.model;
+
+  const out: Partial<ChatEntry> = {};
+  if (Object.keys(usage).length) out.usage = usage;
+  if (typeof m.model === "string" && m.model) out.model = m.model;
+  if (typeof m.reasoning === "string" && m.reasoning.trim()) out.reasoning = m.reasoning.trim();
+  return out;
+}
 
 class JarvisWS {
   private ws: WebSocket | null = null;
@@ -18,8 +39,15 @@ class JarvisWS {
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
       return;
     }
+    void (async () => {
+      await ensureSession();
+      this._open(wsUrlWithSession(this.url));
+    })();
+  }
+
+  private _open(url: string) {
     try {
-      this.ws = new WebSocket(this.url);
+      this.ws = new WebSocket(url);
     } catch (e) {
       console.error("ws connect failed", e);
       this.scheduleReconnect();
@@ -150,7 +178,6 @@ class JarvisWS {
           st.dropChat(this.streamingId);
           this.streamingId = null;
         }
-        if (st.dockedPanels.includes("terminal")) st.undockPanel("terminal");
         st.setOrb("idle");
         break;
       }
@@ -164,16 +191,25 @@ class JarvisWS {
             st.dropChat(this.streamingId);
             this.streamingId = null;
           }
-          if (st.dockedPanels.includes("terminal")) st.undockPanel("terminal");
           st.setOrb("idle");
           break;
         }
+        const meta = chatMetaFromPayload(m);
+        if (meta.usage?.context_used) {
+          st.setContextMeter(meta.usage.context_used);
+        }
         if (this.streamingId) {
           // Stream finished — replace partial with clean final text.
-          st.finalizeChat(this.streamingId, text);
+          st.finalizeChat(this.streamingId, text, meta);
           this.streamingId = null;
         } else {
-          st.pushChat({ id: nextId(), role: "assistant", text, ts: Date.now() });
+          st.pushChat({
+            id: nextId(),
+            role: "assistant",
+            text,
+            ts: Date.now(),
+            ...meta,
+          });
         }
         st.setOrb("speaking");
         setTimeout(() => {
@@ -184,7 +220,15 @@ class JarvisWS {
       case "stream_begin": {
         const id = nextId();
         this.streamingId = id;
-        st.pushChat({ id, role: "assistant", text: "", ts: Date.now(), streaming: true });
+        const model = useStore.getState().health?.model?.model;
+        st.pushChat({
+          id,
+          role: "assistant",
+          text: "",
+          ts: Date.now(),
+          streaming: true,
+          model,
+        });
         st.setOrb("speaking");
         break;
       }
@@ -195,10 +239,29 @@ class JarvisWS {
         break;
       case "stream_end":
         if (this.streamingId) {
-          st.finalizeChat(this.streamingId);
+          const meta = chatMetaFromPayload(m.usage ? { ...m.usage, reasoning: m.reasoning } : m);
+          st.finalizeChat(this.streamingId, undefined, meta);
+          if (meta.usage?.context_used) st.setContextMeter(meta.usage.context_used);
           // keep id so a follow-up `assistant` (clean final) can replace text
         }
         break;
+      case "usage": {
+        const meta = chatMetaFromPayload(m);
+        if (meta.usage?.context_used) st.setContextMeter(meta.usage.context_used);
+        const target =
+          this.streamingId ||
+          [...st.chat].reverse().find((c) => c.role === "assistant")?.id;
+        if (target && meta.usage) st.patchChat(target, meta);
+        break;
+      }
+      case "reasoning": {
+        const text = typeof m.text === "string" ? m.text : "";
+        const target =
+          this.streamingId ||
+          [...st.chat].reverse().find((c) => c.role === "assistant")?.id;
+        if (target && text) st.patchChat(target, { reasoning: text });
+        break;
+      }
       case "thinking":
         st.setOrb("thinking");
         break;
@@ -332,12 +395,29 @@ class JarvisWS {
           permission: m.permission,
           preview: m.preview,
           args: m.args || {},
+          token: m.token,
         });
         break;
       case "done":
         if (useStore.getState().orbState === "thinking") useStore.getState().setOrb("idle");
         st.completePlan();
         break;
+      case "desktop_control_status": {
+        if (typeof m.enabled === "boolean") st.setDesktopControlEnabled(m.enabled);
+        if (m.mode === "hud" || m.mode === "precision" || m.mode === "spatial") {
+          st.setDesktopControlMode(m.mode);
+        }
+        if (typeof m.paused === "boolean") st.setDesktopPaused(m.paused);
+        const gesture = m.status?.gesture || m.gesture;
+        if (gesture) st.setDesktopGesture(String(gesture));
+        const action = m.jarvis_action || m.status?.jarvis_action;
+        if (action) {
+          window.dispatchEvent(
+            new CustomEvent("jarvis:desktop-action", { detail: { action } }),
+          );
+        }
+        break;
+      }
     }
     for (const fn of this.listeners) fn(m);
   }
@@ -353,14 +433,26 @@ class JarvisWS {
   command(cmd: string) {
     this.send({ type: "command", command: cmd });
   }
-  confirm(id: string, approved: boolean) {
-    this.send({ type: "confirm", id, approved });
+  confirm(id: string, approved: boolean, token?: string) {
+    this.send({ type: "confirm", id, approved, token });
   }
   agent(name: string) {
     this.send({ type: "agent", name });
   }
   cancel() {
     this.send({ type: "cancel" });
+  }
+  killSwitch() {
+    this.send({ type: "kill_switch" });
+  }
+  pause() {
+    this.send({ type: "pause" });
+  }
+  resume() {
+    this.send({ type: "resume" });
+  }
+  taskStatus() {
+    this.send({ type: "task_status" });
   }
 }
 

@@ -1,4 +1,5 @@
 import type { Health, SystemStats } from "./store";
+import { apiFetch } from "./session";
 
 export async function getHealth(): Promise<Health> {
   const r = await fetch("/api/health");
@@ -12,12 +13,12 @@ export async function openBarehands(): Promise<{
   error?: string;
   running?: boolean;
 }> {
-  const r = await fetch("/api/barehands/open", { method: "POST" });
+  const r = await apiFetch("/api/barehands/open", { method: "POST" });
   return r.json();
 }
 
 export async function closeBarehands(): Promise<{ ok: boolean; error?: string }> {
-  const r = await fetch("/api/barehands/close", { method: "POST" });
+  const r = await apiFetch("/api/barehands/close", { method: "POST" });
   return r.json();
 }
 
@@ -27,42 +28,42 @@ export async function getBarehandsStatus(): Promise<{
   url?: string;
   keywords?: string[];
 }> {
-  const r = await fetch("/api/barehands/status");
+  const r = await apiFetch("/api/barehands/status");
   return r.json();
 }
 
 export async function getStats(): Promise<SystemStats> {
-  const r = await fetch("/api/stats");
+  const r = await apiFetch("/api/stats");
   return r.json();
 }
 
 export async function getProcesses(limit = 12) {
-  const r = await fetch(`/api/processes?limit=${limit}`);
+  const r = await apiFetch(`/api/processes?limit=${limit}`);
   return r.json();
 }
 
 export async function searchMemory(q: string) {
-  const r = await fetch(`/api/memory/search?q=${encodeURIComponent(q)}`);
+  const r = await apiFetch(`/api/memory/search?q=${encodeURIComponent(q)}`);
   return r.json();
 }
 
 export async function getAgents() {
-  const r = await fetch("/api/agents");
+  const r = await apiFetch("/api/agents");
   return r.json();
 }
 
 export async function getTools() {
-  const r = await fetch("/api/tools");
+  const r = await apiFetch("/api/tools");
   return r.json();
 }
 
 export async function getPlugins() {
-  const r = await fetch("/api/plugins");
+  const r = await apiFetch("/api/plugins");
   return r.json();
 }
 
 export async function cleanSlate() {
-  const r = await fetch("/api/cleanslate", { method: "POST" });
+  const r = await apiFetch("/api/cleanslate", { method: "POST" });
   return r.json();
 }
 
@@ -82,12 +83,12 @@ export interface ImageModelInfo {
 }
 
 export async function getImageModels(): Promise<{ selected: string; models: ImageModelInfo[] }> {
-  const r = await fetch("/api/image-models");
+  const r = await apiFetch("/api/image-models");
   return r.json();
 }
 
 export async function selectImageModel(model: string): Promise<{ ok: boolean; selected?: string; error?: string }> {
-  const r = await fetch("/api/image-models/select", {
+  const r = await apiFetch("/api/image-models/select", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ model }),
@@ -138,10 +139,12 @@ export interface LlmModelsResponse {
   };
   skills?: { id: string; label: string }[];
   models: LlmModelInfo[];
+  reasoning_effort?: string;
+  reasoning_levels?: string[];
 }
 
 export async function getLlmModels(): Promise<LlmModelsResponse> {
-  const r = await fetch("/api/models");
+  const r = await apiFetch("/api/models");
   return r.json();
 }
 
@@ -155,7 +158,7 @@ export async function selectLlmModel(model: string): Promise<{
   error?: string;
 }> {
   try {
-    const r = await fetch("/api/models/select", {
+    const r = await apiFetch("/api/models/select", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ model }),
@@ -170,6 +173,136 @@ export async function selectLlmModel(model: string): Promise<{
     return data;
   } catch (e: any) {
     return { ok: false, error: e?.message || "Network error selecting model" };
+  }
+}
+
+export interface LoadedLlmModel {
+  id: string;
+  name: string;
+  backend?: string;
+  size_gb?: number | null;
+  size_vram_gb?: number | null;
+  family?: string;
+  parameter_size?: string;
+  quantization?: string;
+  context_length?: number;
+  expires_at?: string;
+  status?: string;
+  unloadable?: boolean;
+}
+
+export interface LoadedModelsResponse {
+  ok: boolean;
+  source?: string;
+  loaded: LoadedLlmModel[];
+  available?: LoadedLlmModel[];
+  context_length?: number;
+  selected?: string;
+  endpoint?: string;
+  reasoning_effort?: string;
+  reasoning_levels?: string[];
+}
+
+export async function getLoadedLlmModels(): Promise<LoadedModelsResponse> {
+  const r = await apiFetch("/api/models/loaded");
+  const data = await r.json().catch(() => ({}));
+  return {
+    ok: !!data?.ok,
+    source: data?.source,
+    loaded: Array.isArray(data?.loaded) ? data.loaded : [],
+    available: Array.isArray(data?.available) ? data.available : [],
+    context_length: data?.context_length,
+    selected: data?.selected,
+    endpoint: data?.endpoint,
+    reasoning_effort: data?.reasoning_effort,
+    reasoning_levels: Array.isArray(data?.reasoning_levels) ? data.reasoning_levels : undefined,
+  };
+}
+
+export async function unloadLlmModel(model: string): Promise<{
+  ok: boolean;
+  unloaded?: string;
+  backend?: string;
+  error?: string;
+}> {
+  try {
+    const r = await apiFetch("/api/models/unload", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok && data?.ok !== true) {
+      return { ok: false, error: data?.error || `Unload failed (${r.status})` };
+    }
+    return data;
+  } catch (e: any) {
+    return { ok: false, error: e?.message || "Network error unloading model" };
+  }
+}
+
+export async function loadLlmModel(model: string): Promise<{
+  ok: boolean;
+  loaded?: string;
+  backend?: string;
+  error?: string;
+}> {
+  try {
+    const r = await apiFetch("/api/models/load", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok && data?.ok !== true) {
+      return { ok: false, error: data?.error || `Load failed (${r.status})` };
+    }
+    return data;
+  } catch (e: any) {
+    return { ok: false, error: e?.message || "Network error loading model" };
+  }
+}
+
+export async function setReasoningEffort(effort: string): Promise<{
+  ok: boolean;
+  reasoning_effort?: string;
+  persisted?: boolean;
+  error?: string;
+}> {
+  try {
+    const r = await apiFetch("/api/models/reasoning", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ effort }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok && data?.ok !== true) {
+      return { ok: false, error: data?.error || `Reasoning update failed (${r.status})` };
+    }
+    return data;
+  } catch (e: any) {
+    return { ok: false, error: e?.message || "Network error setting reasoning" };
+  }
+}
+
+export async function pullLlmModel(model: string): Promise<{
+  ok: boolean;
+  pulled?: string;
+  error?: string;
+}> {
+  try {
+    const r = await apiFetch("/api/models/pull", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok && data?.ok !== true) {
+      return { ok: false, error: data?.error || `Pull failed (${r.status})` };
+    }
+    return data;
+  } catch (e: any) {
+    return { ok: false, error: e?.message || "Network error pulling model" };
   }
 }
 
@@ -189,7 +322,7 @@ export async function uploadImage(file: File): Promise<{
 }> {
   const form = new FormData();
   form.append("file", file);
-  const r = await fetch("/api/upload", { method: "POST", body: form });
+  const r = await apiFetch("/api/upload", { method: "POST", body: form });
   return r.json();
 }
 
@@ -204,7 +337,7 @@ export async function analyzeImage(
   const form = new FormData();
   form.append("file", file);
   if (prompt) form.append("prompt", prompt);
-  const r = await fetch("/api/analyze-image", { method: "POST", body: form });
+  const r = await apiFetch("/api/analyze-image", { method: "POST", body: form });
   return r.json();
 }
 
@@ -217,7 +350,7 @@ export async function imageTo3D(
 ): Promise<{ ok: boolean; result?: string; error?: string }> {
   const form = new FormData();
   form.append("file", file);
-  const r = await fetch("/api/image-to-3d", { method: "POST", body: form });
+  const r = await apiFetch("/api/image-to-3d", { method: "POST", body: form });
   return r.json();
 }
 
@@ -239,6 +372,6 @@ export async function img2img(
   form.append("strength", String(strength));
   form.append("steps", String(steps));
   form.append("guidance_scale", String(guidance));
-  const r = await fetch("/api/img2img", { method: "POST", body: form });
+  const r = await apiFetch("/api/img2img", { method: "POST", body: form });
   return r.json();
 }

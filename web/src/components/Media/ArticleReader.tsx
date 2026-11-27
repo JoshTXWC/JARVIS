@@ -10,6 +10,7 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useState } from "react";
 import { useStore } from "../../lib/store";
+import { apiFetch } from "../../lib/session";
 
 interface Article {
   ok: boolean;
@@ -43,7 +44,7 @@ export default function ArticleReader() {
     setErr(null);
     setData(null);
     const ctrl = new AbortController();
-    fetch(`/api/reader?url=${encodeURIComponent(url)}`, { signal: ctrl.signal })
+    apiFetch(`/api/reader?url=${encodeURIComponent(url)}`, { signal: ctrl.signal })
       .then(async (r) => {
         const j = (await r.json()) as Article;
         if (!j.ok) throw new Error(j.error || "reader failed");

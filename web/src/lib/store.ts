@@ -2,7 +2,7 @@ import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
 import { DEFAULT_DOCKED } from "./dockCatalog";
 
-export type OrbState = "idle" | "listening" | "thinking" | "speaking";
+export type OrbState = "idle" | "listening" | "thinking" | "speaking" | "executing" | "error";
 
 export type ChatRole = "user" | "assistant" | "info" | "error";
 
@@ -15,6 +15,19 @@ export interface ChatAttachment {
   mime?: string;
 }
 
+/** Per-reply LLM stats (llama.cpp / OpenAI / Ollama style). */
+export interface ChatUsage {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+  duration_ms?: number;
+  tokens_per_second?: number;
+  prompt_per_second?: number;
+  cache_tokens?: number;
+  context_used?: number;
+  model?: string;
+}
+
 export interface ChatEntry {
   id: string;
   role: ChatRole;
@@ -22,6 +35,11 @@ export interface ChatEntry {
   ts: number;
   streaming?: boolean;    // true while tokens still arriving
   attachments?: ChatAttachment[];
+  /** Model id/label that produced this assistant turn. */
+  model?: string;
+  /** Extracted <thinking> / CoT for this turn. */
+  reasoning?: string;
+  usage?: ChatUsage;
 }
 
 export interface ToolCall {
@@ -42,6 +60,8 @@ export interface ConfirmRequest {
   permission: "safe" | "caution" | "dangerous";
   preview: string;
   args: Record<string, unknown>;
+  /** Single-use approval grant from the backend (not persisted). */
+  token?: string;
 }
 
 export interface SystemStats {
@@ -181,8 +201,15 @@ interface StoreState {
   dropChat: (id: string) => void;
   clearChat: () => void;
   appendChatText: (id: string, piece: string) => void;
-  finalizeChat: (id: string, text?: string) => void;
+  finalizeChat: (id: string, text?: string, meta?: Partial<ChatEntry>) => void;
   updateChat: (id: string, text: string) => void;
+  patchChat: (id: string, patch: Partial<ChatEntry>) => void;
+  /** Truncate transcript from `id` onward (edit / regenerate). */
+  truncateChatFrom: (id: string) => void;
+  /** Last known context fill from the server (prompt+completion). */
+  contextUsed: number;
+  contextLimit: number;
+  setContextMeter: (used: number, limit?: number) => void;
   // pending attachments (drag-dropped, waiting to send with next message)
   pendingAttachments: ChatAttachment[];
   addAttachment: (a: ChatAttachment) => void;
@@ -301,9 +328,27 @@ interface StoreState {
   /** Show webcam under HUD while Hands is on (off = landmark nodes only). */
   handsShowCam: boolean;
   setHandsShowCam: (v: boolean) => void;
+  // Barehands 2.0 — system-wide desktop control (opt-in, off by default).
+  desktopControlEnabled: boolean;
+  setDesktopControlEnabled: (v: boolean) => void;
+  desktopControlMode: "hud" | "precision" | "spatial";
+  setDesktopControlMode: (m: "hud" | "precision" | "spatial") => void;
+  desktopOverlayEnabled: boolean;
+  setDesktopOverlayEnabled: (v: boolean) => void;
+  desktopVizMode: "skeleton" | "minimal" | "hidden";
+  setDesktopVizMode: (m: "skeleton" | "minimal" | "hidden") => void;
+  desktopPaused: boolean;
+  setDesktopPaused: (v: boolean) => void;
+  desktopGesture: string;
+  setDesktopGesture: (v: string) => void;
+  desktopCalibrating: boolean;
+  setDesktopCalibrating: (v: boolean) => void;
   // World background: classic centered orb vs interactive neural cloud.
   backgroundMode: "orb" | "neural";
   setBackgroundMode: (m: "orb" | "neural") => void;
+  // Command Center view routing (replaces floating-panel canvas).
+  activeView: string;
+  setActiveView: (v: string) => void;
 }
 
 let _id = 0;
@@ -354,15 +399,34 @@ export const useStore = create<StoreState>()(persist((set) => ({
     set((st) => ({
       chat: st.chat.map((c) => (c.id === id ? { ...c, text: c.text + piece } : c)),
     })),
-  finalizeChat: (id, text) =>
+  finalizeChat: (id, text, meta) =>
     set((st) => ({
       chat: st.chat.map((c) =>
-        c.id === id ? { ...c, streaming: false, text: text ?? c.text } : c,
+        c.id === id
+          ? { ...c, ...meta, streaming: false, text: text ?? c.text }
+          : c,
       ),
     })),
   updateChat: (id, text) =>
     set((st) => ({
       chat: st.chat.map((c) => (c.id === id ? { ...c, text } : c)),
+    })),
+  patchChat: (id, patch) =>
+    set((st) => ({
+      chat: st.chat.map((c) => (c.id === id ? { ...c, ...patch } : c)),
+    })),
+  truncateChatFrom: (id) =>
+    set((st) => {
+      const idx = st.chat.findIndex((c) => c.id === id);
+      if (idx < 0) return {};
+      return { chat: st.chat.slice(0, idx) };
+    }),
+  contextUsed: 0,
+  contextLimit: 8192,
+  setContextMeter: (used, limit) =>
+    set((st) => ({
+      contextUsed: Math.max(0, used),
+      contextLimit: limit && limit > 0 ? limit : st.contextLimit,
     })),
   pendingAttachments: [],
   addAttachment: (a) => set((st) => ({ pendingAttachments: [...st.pendingAttachments, a] })),
@@ -447,17 +511,25 @@ export const useStore = create<StoreState>()(persist((set) => ({
   clearMedia: () => set({ media: [] }),
   layoutEdit: false,
   setLayoutEdit: (v) => set({ layoutEdit: v }),
+  activeView: "command",
+  setActiveView: (v) => set({ activeView: v }),
   dockedPanels: [...DEFAULT_DOCKED],
   dockPanel: (id) =>
-    set((st) =>
-      st.dockedPanels.includes(id)
-        ? {}
-        : { dockedPanels: [...st.dockedPanels, id], dockHot: false },
-    ),
+    set((st) => {
+      const next = st.dockedPanels.includes(id)
+        ? st.dockedPanels
+        : [...st.dockedPanels, id];
+      return {
+        dockedPanels: next,
+        dockHot: false,
+        activeView: st.activeView === id ? "command" : st.activeView,
+      };
+    }),
   undockPanel: (id) =>
     set((st) => ({
       dockedPanels: st.dockedPanels.filter((p) => p !== id),
       dockHot: false,
+      activeView: id,
     })),
   clearDockedPanels: () => set({ dockedPanels: [], dockHot: false }),
   dockHot: false,
@@ -561,6 +633,20 @@ export const useStore = create<StoreState>()(persist((set) => ({
   setHandsCamMode: (m) => set({ handsCamMode: m }),
   handsShowCam: true,
   setHandsShowCam: (v) => set({ handsShowCam: v }),
+  desktopControlEnabled: false,
+  setDesktopControlEnabled: (v) => set({ desktopControlEnabled: v }),
+  desktopControlMode: "hud",
+  setDesktopControlMode: (m) => set({ desktopControlMode: m }),
+  desktopOverlayEnabled: true,
+  setDesktopOverlayEnabled: (v) => set({ desktopOverlayEnabled: v }),
+  desktopVizMode: "skeleton",
+  setDesktopVizMode: (m) => set({ desktopVizMode: m }),
+  desktopPaused: false,
+  setDesktopPaused: (v) => set({ desktopPaused: v }),
+  desktopGesture: "",
+  setDesktopGesture: (v) => set({ desktopGesture: v }),
+  desktopCalibrating: false,
+  setDesktopCalibrating: (v) => set({ desktopCalibrating: v }),
   backgroundMode: "orb",
   setBackgroundMode: (m) => set({ backgroundMode: m }),
 }), {
@@ -568,7 +654,7 @@ export const useStore = create<StoreState>()(persist((set) => ({
   // (orb, audio levels, mic flags, transient overlays, attachments) lives
   // in memory only so refresh starts clean.
   name: "jarvis.store.v1",
-  version: 3,
+  version: 4,
   storage: createJSONStorage(() => localStorage),
   migrate: (persisted, version) => {
     const p = (persisted || {}) as Record<string, unknown>;
@@ -576,6 +662,10 @@ export const useStore = create<StoreState>()(persist((set) => ({
     // v3: chat fused into Dialogue — force core tiles back into the dock.
     if (version < 3) {
       p.dockedPanels = [...DEFAULT_DOCKED];
+    }
+    // v4: Hands must be an explicit opt-in each session (no auto camera).
+    if (version < 4) {
+      p.gestureEnabled = false;
     }
     if (p.backgroundMode !== "orb" && p.backgroundMode !== "neural") {
       p.backgroundMode = "orb";
@@ -591,9 +681,13 @@ export const useStore = create<StoreState>()(persist((set) => ({
     bargeIn:      state.bargeIn,
     wakeEnabled:  state.wakeEnabled,
     dockedPanels: state.dockedPanels,
-    gestureEnabled: state.gestureEnabled,
+    // Do NOT persist gestureEnabled — Hands stays off until the user enables it.
     handsCamMode: state.handsCamMode,
     handsShowCam: state.handsShowCam,
+    // Persist preference flags only — never auto-enable injection on boot.
+    desktopControlMode: state.desktopControlMode,
+    desktopOverlayEnabled: state.desktopOverlayEnabled,
+    desktopVizMode: state.desktopVizMode,
     backgroundMode: state.backgroundMode,
   }),
   // After rehydrate, mark streaming chats as finalised (their stream never
@@ -608,17 +702,28 @@ export const useStore = create<StoreState>()(persist((set) => ({
     if ((!state.dockedPanels || state.dockedPanels.length === 0) && anyState.hiddenPanels?.length) {
       state.dockedPanels = [...anyState.hiddenPanels];
     }
+    // Canvas v4: orb stage + tool dock; chat window on screen by default.
+    try {
+      if (localStorage.getItem("jarvis.canvas.v4") !== "1") {
+        state.dockedPanels = [...DEFAULT_DOCKED];
+        localStorage.setItem("jarvis.canvas.v4", "1");
+      }
+    } catch { /* ignore */ }
     if (!state.dockedPanels) state.dockedPanels = [...DEFAULT_DOCKED];
-    // Drop legacy / retired dock ids (chat fused into Dialogue; mission removed).
-    const retired = new Set(["chat", "mission"]);
-    state.dockedPanels = state.dockedPanels.filter((id) => !retired.has(id));
-    // Reintroduce Terminal for ops / brain errors if an older session dropped it.
-    if (!state.dockedPanels.includes("terminal")) {
-      state.dockedPanels = [...state.dockedPanels, "terminal"];
+    const allowed = new Set<string>(["chat", "health", "settings"]);
+    state.dockedPanels = state.dockedPanels.filter((id) => allowed.has(id));
+    for (const id of DEFAULT_DOCKED) {
+      if (!state.dockedPanels.includes(id)) {
+        state.dockedPanels = [...state.dockedPanels, id];
+      }
     }
     if (state.backgroundMode !== "orb" && state.backgroundMode !== "neural") {
       state.backgroundMode = "orb";
     }
+    // Hands is always an explicit opt-in — never restore camera/tracking on boot.
+    state.gestureEnabled = false;
+    state.desktopControlEnabled = false;
+    state.desktopPaused = false;
     // Cold launch (reboot / app relaunch) vs in-app reload. No alive marker ⇒
     // fresh process ⇒ don't auto-reopen the prior session; stash it for an
     // on-demand restore and start clean. A reload keeps the marker and the

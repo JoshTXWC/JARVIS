@@ -150,9 +150,9 @@ model:
   #   Grok 4 / Grok 4 Fast  → XAI_API_KEY    → https://api.x.ai/v1
   #   Gemini 2.5 Flash/Pro  → GEMINI_API_KEY → Google OpenAI-compatible route
   provider: openai_compatible
-  endpoint: https://generativelanguage.googleapis.com/v1beta/openai
-  model: gemini-pro-latest
-  api_key_env: GEMINI_API_KEY
+  endpoint: http://localhost:11434/v1
+  model: qwen2.5:1.5b
+  api_key_env: OLLAMA_API_KEY
   # Restored when leaving a cloud model via the switcher.
   local_endpoint: http://localhost:11434/v1
   local_api_key_env: OLLAMA_API_KEY
@@ -160,7 +160,7 @@ model:
   max_tokens: 4096
   request_timeout_seconds: 300
   native_tool_calls: true
-  reasoning_effort: none
+  reasoning_effort: low
 
 image_model:
   # Selectable in the JARVIS command bar. Options:
@@ -169,10 +169,10 @@ image_model:
 
 permissions:
   # safe    = SAFE auto, CAUTION ask, DANGEROUS refuse unless explicit
-  # confirm = SAFE auto, CAUTION ask, DANGEROUS ask with hard warning
+  # confirm = SAFE auto, CAUTION ask, DANGEROUS ask with hard warning (DEFAULT)
   # auto    = SAFE auto, CAUTION auto, DANGEROUS ask
-  # bypass  = ALL auto-allowed (denylist remains as last guardrail)
-  mode: bypass
+  # bypass  = CAUTION+SAFE auto; DANGEROUS still asks; hard denials never bypassed
+  mode: confirm
   # Patterns matched against the full command/string. Case-insensitive.
   denylist:
     - "rm -rf /"
