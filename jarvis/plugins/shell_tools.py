@@ -22,14 +22,15 @@ def register(registry):
         name="run_shell",
         description=(
             "Run a shell command. Privileged — requires user approval. "
-            "cwd defaults to project root; elevated=true requests unrestricted cwd."
+            "Omit cwd unless the user named a folder (defaults to the JARVIS "
+            "project root); elevated=true requests unrestricted cwd."
         ),
         permission=Permission.DANGEROUS,
         parameters={
             "type": "object",
             "properties": {
                 "command": {"type": "string", "description": "Shell command line."},
-                "cwd": {"type": "string", "description": "Working directory.", "default": ""},
+                "cwd": {"type": "string", "description": "Optional existing working directory. Leave empty by default.", "default": ""},
                 "timeout": {"type": "integer", "default": 60},
                 "elevated": {"type": "boolean", "default": False},
             },
@@ -42,6 +43,7 @@ def register(registry):
     ) -> str:
         if looks_like_secret_exfil_command(command):
             return "DENIED: command resembles secret exfiltration"
+        cwd, note = _existing_cwd(cwd, cfg.project_root)
         target_cwd = cwd or str(cfg.project_root)
         if not elevated:
             # Stay inside project root unless explicitly elevated + approved
@@ -55,7 +57,7 @@ def register(registry):
         res = await run_command(command, cwd=target_cwd, timeout=timeout)
         if memory is not None:
             memory.bump_command(command)
-        return redact_text(_format_result(res))
+        return redact_text(note + _format_result(res))
 
     @tool(
         name="run_powershell",
@@ -78,6 +80,7 @@ def register(registry):
     ) -> str:
         if looks_like_secret_exfil_command(command):
             return "DENIED: command resembles secret exfiltration"
+        cwd, note = _existing_cwd(cwd, cfg.project_root)
         target_cwd = cwd or str(cfg.project_root)
         if not elevated:
             root = str(cfg.project_root)
@@ -90,7 +93,7 @@ def register(registry):
         res = await run_command(command, cwd=target_cwd, timeout=timeout, shell="powershell")
         if memory is not None:
             memory.bump_command(f"powershell: {command}")
-        return redact_text(_format_result(res))
+        return redact_text(note + _format_result(res))
 
     @tool(
         name="which",
@@ -134,6 +137,18 @@ def register(registry):
         description="Shell + PowerShell execution, PATH lookup, env vars.",
         permissions_needed=[Permission.DANGEROUS],
     ))
+
+
+def _existing_cwd(cwd: str, root) -> tuple[str, str]:
+    """Small models often invent a cwd (e.g. /home/user/project). If the
+    directory doesn't exist, run in the project root and say so instead of
+    failing after the user already approved the command."""
+    c = (cwd or "").strip()
+    if not c:
+        return "", ""
+    if os.path.isdir(os.path.expanduser(c)):
+        return os.path.expanduser(c), ""
+    return "", f"(note: cwd '{c}' does not exist; ran in {root})\n"
 
 
 def _format_result(res) -> str:

@@ -32,6 +32,19 @@ class ModelConfig(BaseModel):
     request_timeout_seconds: int = 120
     native_tool_calls: bool = False
     reasoning_effort: str | None = None
+    # Prompt size strategy. `lean` sends a compact persona and only the tools
+    # relevant to the current request (needed for small local models and
+    # Ollama's default 4096-token context). `full` sends the whole persona and
+    # every tool. `auto` = lean for localhost endpoints, full for cloud.
+    prompt_mode: str = "auto"
+    # Max tool schemas sent per turn in lean mode.
+    max_tools: int = 14
+    # Lean mode: approximate character budget for conversation history sent
+    # per request (~4 chars per token). Older turns stay in memory.db.
+    history_budget_chars: int = 6000
+    # Start `ollama serve` in the background at boot when the endpoint is a
+    # local Ollama (port 11434) that isn't answering yet.
+    auto_start_ollama: bool = True
     # Anti-repetition — light touch. Higher values degrade fluency and can
     # paradoxically push the model into longer loops. Ollama already
     # auto-translates `frequency_penalty` → repeat_penalty internally, so
@@ -103,6 +116,9 @@ class PluginToggle(BaseModel):
 class AssistantConfig(BaseModel):
     name: str = "JARVIS"
     persona: str = "You are JARVIS, a calm, precise, proactive local AI assistant."
+    # Short persona used in lean prompt mode (small local models). Blank =
+    # built-in compact JARVIS persona (jarvis/core/tool_select.py).
+    persona_compact: str = ""
 
 
 class MissionConfig(BaseModel):

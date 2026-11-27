@@ -91,6 +91,52 @@ def _openai_compat_payload(
     return payload
 
 
+# Models (per endpoint+model) that rejected an optional payload field. Filled
+# lazily on the first HTTP 400 so later turns don't pay the retry cost.
+_UNSUPPORTED_FIELDS: dict[str, set[str]] = {}
+
+
+def _unsupported_key(endpoint: str, model: str) -> str:
+    return f"{(endpoint or '').rstrip('/')}::{model}"
+
+
+def _strip_unsupported(payload: dict[str, Any], endpoint: str) -> dict[str, Any]:
+    """Remove fields this model already told us it doesn't support."""
+    for field in _UNSUPPORTED_FIELDS.get(_unsupported_key(endpoint, payload.get("model", "")), ()):
+        payload.pop(field, None)
+    return payload
+
+
+def _degrade_payload(payload: dict[str, Any], status: int | None, err_body: str, endpoint: str) -> bool:
+    """On an HTTP 400, drop the optional field the server complained about.
+
+    Ollama answers e.g. `"qwen2.5:1.5b" does not support thinking` when
+    `reasoning_effort` is sent to a non-reasoning model, or `does not support
+    tools` for models without a tool template. Rather than failing the whole
+    turn, drop the offending field, remember it for this model, and let the
+    caller retry once. Returns True when the payload was changed.
+    """
+    if status != 400:
+        return False
+    low = (err_body or "").lower()
+    drop: list[str] = []
+    if "reasoning_effort" in payload and ("thinking" in low or "reasoning" in low):
+        drop.append("reasoning_effort")
+    if "tools" in payload and ("support tools" in low or ("tool" in low and "not support" in low)):
+        drop.append("tools")
+    if "stream_options" in payload and ("stream_options" in low or not drop):
+        drop.append("stream_options")
+    if not drop:
+        return False
+    key = _unsupported_key(endpoint, payload.get("model", ""))
+    for field in drop:
+        payload.pop(field, None)
+        if field != "stream_options":
+            _UNSUPPORTED_FIELDS.setdefault(key, set()).add(field)
+    log.info("LLM rejected %s for %s; retrying without", drop, payload.get("model"))
+    return True
+
+
 def is_brain_error_text(text: str | None) -> bool:
     t = (text or "").lstrip()
     return t.startswith("[brain error]")
@@ -259,9 +305,16 @@ class LLMBrain:
             tool_schemas=tool_schemas if self.mc.native_tool_calls else None,
         )
 
+        _strip_unsupported(payload, self.mc.endpoint)
         t0 = time.perf_counter()
         try:
             resp = await self._client.post(url, json=payload, headers=headers)
+            for _ in range(3):
+                if resp.status_code < 400 or not _degrade_payload(
+                    payload, resp.status_code, resp.text[:500], self.mc.endpoint
+                ):
+                    break
+                resp = await self._client.post(url, json=payload, headers=headers)
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
             body = e.response.text[:500] if e.response else ""
@@ -412,11 +465,14 @@ class LLMBrain:
             return parts, acc, finish, last, truncated, None, ""
 
         try:
+            _strip_unsupported(payload, self.mc.endpoint)
             text_parts, tc_acc, finish_reason, last_chunk, loop_truncated, status, err_body = await _stream_once(payload)
-            if status is not None and "stream_options" in payload and status == 400:
-                # Older Ollama / LM Studio builds reject stream_options — retry once.
-                log.info("stream_options rejected; retrying without include_usage")
-                payload.pop("stream_options", None)
+            # Older Ollama / LM Studio builds reject stream_options; non-reasoning
+            # models reject reasoning_effort; some models reject tools. Degrade
+            # the payload and retry (bounded) instead of failing the turn.
+            for _ in range(3):
+                if status is None or not _degrade_payload(payload, status, err_body, self.mc.endpoint):
+                    break
                 text_parts, tc_acc, finish_reason, last_chunk, loop_truncated, status, err_body = await _stream_once(payload)
             if status is not None:
                 log.error("LLM stream HTTP %s: %s", status, err_body)

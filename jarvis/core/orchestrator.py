@@ -139,8 +139,116 @@ class Orchestrator:
         return [Event(EventKind.UI, text=payload.get("action", "ui"), payload=payload)]
 
     # ------------------------------------------------------------------
+    def _trim_history_for_overflow(self, keep: int = 6) -> int:
+        """Keep only the tail of the conversation, starting at a real user turn."""
+        if len(self._history) <= keep:
+            # Nothing older to drop; shrink the tool set instead.
+            self.cfg.model.max_tools = max(4, (self.cfg.model.max_tools or 14) // 2)
+            return 0
+        start = len(self._history) - keep
+        for i in range(start, -1, -1):
+            m = self._history[i]
+            c = m.get("content")
+            if m.get("role") == "user" and "tool_call_id" not in m and isinstance(c, str) \
+                    and not c.startswith(("<tool_result", "(internal protocol")):
+                start = i
+                break
+        dropped = start
+        self._history = self._history[start:]
+        return dropped
+
+    def _history_window(self) -> list[dict]:
+        """History to send this hop. In lean mode, cap it to a character
+        budget (~4 chars/token) so small context windows don't overflow; the
+        cut always lands on a real user turn so tool results never orphan."""
+        if not self._lean():
+            return self._history
+        budget = int(getattr(self.cfg.model, "history_budget_chars", 6000) or 6000)
+        total = 0
+        start = len(self._history)
+        for i in range(len(self._history) - 1, -1, -1):
+            c = self._history[i].get("content")
+            total += len(c) if isinstance(c, str) else len(json.dumps(c, default=str))
+            for tc in self._history[i].get("tool_calls") or []:
+                total += len(json.dumps(tc, default=str))
+            start = i
+            if total > budget:
+                break
+        if start == 0:
+            return self._history
+        # Advance to the next real user message so we never start mid-exchange.
+        for j in range(start, len(self._history)):
+            m = self._history[j]
+            c = m.get("content")
+            if m.get("role") == "user" and "tool_call_id" not in m and isinstance(c, str) \
+                    and not c.startswith(("<tool_result", "(internal protocol")):
+                return self._history[j:]
+        # Single huge turn: keep from its user message anyway.
+        for j in range(len(self._history) - 1, -1, -1):
+            m = self._history[j]
+            if m.get("role") == "user" and "tool_call_id" not in m:
+                return self._history[j:]
+        return self._history
+
+    def _lean(self) -> bool:
+        from .tool_select import lean_mode
+        return lean_mode(self.cfg.model)
+
+    def _turn_user_text(self) -> str:
+        """Latest real user message (skips tool results / internal nudges)."""
+        for m in reversed(self._history):
+            if m.get("role") != "user" or "tool_call_id" in m:
+                continue
+            c = m.get("content")
+            if isinstance(c, str) and not c.startswith(("<tool_result", "(internal protocol")):
+                return c
+        return ""
+
+    def _recent_tool_names(self) -> list[str]:
+        names: list[str] = []
+        for m in reversed(self._history):
+            if m.get("role") == "user" and "tool_call_id" not in m:
+                c = m.get("content")
+                if isinstance(c, str) and not c.startswith(("<tool_result", "(internal protocol")):
+                    break
+            for tc in m.get("tool_calls") or []:
+                n = (tc.get("function") or {}).get("name")
+                if n:
+                    names.append(n)
+        return names
+
+    def _turn_tool_names(self) -> list[str] | None:
+        """Tool names to expose this hop. None = every registered tool."""
+        allow = None
+        if self._active_agent and self._active_agent.tool_allowlist:
+            allow = list(self._active_agent.tool_allowlist)
+        if not self._lean():
+            return allow
+        from .tool_select import select_tools
+        tools = self.registry.all_tools()
+        return select_tools(
+            [t.name for t in tools],
+            self._turn_user_text(),
+            descriptions={t.name: t.description for t in tools},
+            recent_tools=self._recent_tool_names(),
+            max_tools=getattr(self.cfg.model, "max_tools", 14) or 14,
+            allowlist=allow,
+        )
+
+    def _turn_tool_schemas(self) -> list[dict]:
+        names = self._turn_tool_names()
+        schemas = self.registry.schemas()
+        if names is None:
+            return schemas
+        by_name = {s["name"]: s for s in schemas}
+        return [by_name[n] for n in names if n in by_name]
+
     def _system_prompt(self) -> str:
+        lean = self._lean()
         persona = self.cfg.A.persona.strip()
+        if lean:
+            from .tool_select import COMPACT_PERSONA
+            persona = (getattr(self.cfg.A, "persona_compact", "") or COMPACT_PERSONA).strip()
         runtime = (
             "Runtime context: "
             f"provider={self.cfg.model.provider}; "
@@ -174,7 +282,19 @@ class Orchestrator:
         mem_block = self._recalled_block()
         if mem_block:
             persona = "\n\n".join([persona, mem_block])
-        tools_doc = self.registry.documentation()
+        names = self._turn_tool_names()
+        if lean and self.cfg.model.native_tool_calls:
+            # Native tool schemas already carry names + descriptions; a second
+            # prose copy just burns context on small local models.
+            tools_doc = ""
+        elif names is None:
+            tools_doc = self.registry.documentation()
+        else:
+            wanted = set(names)
+            tools_doc = "\n".join(
+                f"- {t.name}({', '.join((t.parameters.get('properties') or {}).keys())}): {t.description}"
+                for t in self.registry.all_tools() if t.name in wanted
+            )
         return self.brain.build_system_prompt(persona, tools_doc)
 
     def _recalled_block(self) -> str:
@@ -286,7 +406,12 @@ class Orchestrator:
         u = getattr(self.cfg, "ultimate", None)
         if u is None or not u.enabled or not u.autonomous_planning:
             return ""
-        if len((user_text or "").strip()) < max(20, u.plan_min_chars):
+        min_chars = max(20, u.plan_min_chars)
+        if self._lean():
+            # Each planning round-trip is a full extra LLM call; on small local
+            # models reserve it for genuinely long, multi-part requests.
+            min_chars = max(min_chars, 160)
+        if len((user_text or "").strip()) < min_chars:
             return ""
         prompt = [
             {
@@ -309,6 +434,10 @@ class Orchestrator:
             return ""
         plan = clean_assistant_text(reply.text).strip()
         if not plan or plan.upper().startswith("NONE") or len(plan) < 12:
+            return ""
+        # Small models often answer the question instead of planning. Only
+        # keep output that actually looks like a numbered/bulleted step list.
+        if len(_plan_steps(plan)) < 2 or not re.search(r"(?m)^\s*(?:\d+[.)]|[-*•])\s+", plan):
             return ""
         return plan
 
@@ -606,6 +735,7 @@ class Orchestrator:
             )
 
         hop = 0
+        overflow_retries = 0
         promise_followups = 0
         reflections = 0
         try:
@@ -620,7 +750,7 @@ class Orchestrator:
             messages: list[dict] = [
                 {"role": "system", "content": self._system_prompt()}
             ]
-            messages.extend(self._history)
+            messages.extend(self._history_window())
 
             # Stream this hop. Bridge sync on_delta callback → async event
             # yield via a queue so consumers see token-by-token output.
@@ -636,7 +766,7 @@ class Orchestrator:
             stream_task = asyncio.create_task(
                 self.brain.chat_stream(
                     messages,
-                    tool_schemas=self.registry.schemas(),
+                    tool_schemas=self._turn_tool_schemas(),
                     on_delta=_on_delta,
                 )
             )
@@ -711,6 +841,25 @@ class Orchestrator:
                 yield Event(EventKind.USAGE, payload=reply.usage.as_dict())
 
             assistant_text = clean_assistant_text(reply.text)
+            # Context overflow (Ollama defaults to a 4096-token window): drop
+            # older turns and retry this hop once instead of failing the turn.
+            if (
+                is_brain_error_text(assistant_text)
+                and not reply.tool_calls
+                and overflow_retries < 1
+                and _is_context_overflow(assistant_text)
+            ):
+                overflow_retries += 1
+                dropped = self._trim_history_for_overflow()
+                hop -= 1
+                yield Event(
+                    EventKind.INFO,
+                    text=(
+                        f"context window full — trimmed {dropped} older messages and retrying. "
+                        "Tip: set OLLAMA_CONTEXT_LENGTH=8192 (or higher) and restart Ollama."
+                    ),
+                )
+                continue
             # Brain transport failures must never enter chat/TTS — terminal only.
             if is_brain_error_text(assistant_text) and not reply.tool_calls:
                 log.error("%s", assistant_text)
@@ -859,7 +1008,7 @@ class Orchestrator:
             },
         ]
         repaired = await self.brain.chat(
-            repair_messages, tool_schemas=self.registry.schemas()
+            repair_messages, tool_schemas=self._turn_tool_schemas()
         )
         repaired_text = clean_assistant_text(repaired.text)
         if repaired.tool_calls or not is_malformed_reply(repaired_text, user_text):
@@ -1125,6 +1274,16 @@ class Orchestrator:
                 f"{untrusted}</tool_result>"
             )
             self._history.append({"role": "user", "content": marker})
+
+
+_OVERFLOW_RE = re.compile(
+    r"exceeds the available context|context length|context_length_exceeded|maximum context|too many tokens|context size",
+    re.IGNORECASE,
+)
+
+
+def _is_context_overflow(text: str) -> bool:
+    return bool(_OVERFLOW_RE.search(text or ""))
 
 
 def _to_str(x: Any) -> str:
