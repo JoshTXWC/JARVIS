@@ -60,12 +60,6 @@ export default function CommandPalette() {
       });
     }
     out.push({
-      id: "settings:security",
-      label: "Open Settings",
-      group: "Settings",
-      run: () => undockPanel("settings"),
-    });
-    out.push({
       id: "task:pause",
       label: "Pause current task",
       group: "Tasks",
@@ -90,7 +84,7 @@ export default function CommandPalette() {
         group: "Tools",
         hint: t.permission,
         run: () => {
-          undockPanel("tools");
+          undockPanel("chat");
           wsClient.chat(
             `Please run the tool \`${t.name}\` if appropriate. Use a real tool call; confirm if required.`,
           );
@@ -102,9 +96,7 @@ export default function CommandPalette() {
         id: `chat:${m.id}`,
         label: (m.text || "").slice(0, 80) || "(empty)",
         group: "Recent",
-        run: () => {
-          /* focus dialogue — already open */
-        },
+        run: () => undockPanel("chat"),
       });
     }
     const needle = q.trim().toLowerCase();

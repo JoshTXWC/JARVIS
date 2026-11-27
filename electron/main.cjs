@@ -116,6 +116,9 @@ function pickTrayIcon() {
 function showWindow() {
   if (!mainWindow) return;
   if (mainWindow.isMinimized()) mainWindow.restore();
+  try {
+    if (!mainWindow.isFullScreen()) mainWindow.setFullScreen(true);
+  } catch { /* noop */ }
   mainWindow.show();
   mainWindow.focus();
   try { mainWindow.webContents.send("jarvis:visibility-changed", true); } catch { /* noop */ }
@@ -261,43 +264,114 @@ function persistCurrentBounds() {
   } catch { /* noop */ }
 }
 
+/** Center a sized window on the primary work area. */
+function centeredOnPrimary(width = FULL_W, height = FULL_H) {
+  const a = screen.getPrimaryDisplay().workArea;
+  const w = Math.min(Math.max(width, 1024), a.width);
+  const h = Math.min(Math.max(height, 700), a.height);
+  return {
+    width: w,
+    height: h,
+    x: a.x + Math.round((a.width - w) / 2),
+    y: a.y + Math.round((a.height - h) / 2),
+  };
+}
+
+/**
+ * Keep the window usable on a real display.
+ * A 1px intersection is not enough — require a visible title-bar region,
+ * then clamp into the best work area (fixes DPI / monitor-change restores).
+ */
+function clampBoundsToDisplays(b) {
+  const width = Math.max(1024, b.width || FULL_W);
+  const height = Math.max(700, b.height || FULL_H);
+  const x = Number.isFinite(b.x) ? b.x : 0;
+  const y = Number.isFinite(b.y) ? b.y : 0;
+
+  const displays = screen.getAllDisplays();
+  let best = null;
+  let bestArea = 0;
+  for (const d of displays) {
+    const a = d.workArea;
+    const x1 = Math.max(x, a.x);
+    const y1 = Math.max(y, a.y);
+    const x2 = Math.min(x + width, a.x + a.width);
+    const y2 = Math.min(y + height, a.y + a.height);
+    const area = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+    if (area > bestArea) {
+      bestArea = area;
+      best = a;
+    }
+  }
+
+  const minVisibleW = Math.min(280, width);
+  const minVisibleH = Math.min(120, height);
+  if (!best || bestArea < minVisibleW * minVisibleH) {
+    return centeredOnPrimary(width, height);
+  }
+
+  let w = Math.min(width, best.width);
+  let h = Math.min(height, best.height);
+  let nx = x;
+  let ny = y;
+  if (nx + w > best.x + best.width) nx = best.x + best.width - w;
+  if (ny + h > best.y + best.height) ny = best.y + best.height - h;
+  if (nx < best.x) nx = best.x;
+  if (ny < best.y) ny = best.y;
+  return { x: nx, y: ny, width: w, height: h };
+}
+
 function pickInitialBounds() {
   const store = loadStoredBounds();
   // Prefer the flat "full" key; also accept a legacy top-level bounds object
   // that has width/height directly (older single-mode saves).
   const saved = store.full && store.full.width ? store.full
     : (store.width ? store : null);
-  if (!saved) return { width: FULL_W, height: FULL_H };
-  // Validate the saved bounds intersect a current display so we don't
-  // restore the window off-screen after a monitor change.
-  const displays = screen.getAllDisplays();
-  const fits = displays.some((d) => {
-    const a = d.workArea;
-    return (
-      saved.x < a.x + a.width &&
-      saved.x + saved.width > a.x &&
-      saved.y < a.y + a.height &&
-      saved.y + saved.height > a.y
-    );
-  });
-  if (!fits) return { width: FULL_W, height: FULL_H };
-  return saved;
+  if (!saved) return centeredOnPrimary();
+  return clampBoundsToDisplays(saved);
+}
+
+function ensureMainWindowOnScreen() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (mainWindow.isMinimized() || mainWindow.isFullScreen()) return;
+  try {
+    const cur = mainWindow.getBounds();
+    const next = clampBoundsToDisplays(cur);
+    if (
+      next.x !== cur.x ||
+      next.y !== cur.y ||
+      next.width !== cur.width ||
+      next.height !== cur.height
+    ) {
+      mainWindow.setBounds(next, false);
+      saveStoredBounds({ full: next });
+      console.log("[electron] repositioned window on-screen", next);
+    }
+  } catch (e) {
+    console.warn("[electron] ensureMainWindowOnScreen failed", e);
+  }
 }
 
 function createWindow() {
-  const init = pickInitialBounds();
+  const display = screen.getPrimaryDisplay();
+  const { width, height } = display.workAreaSize;
   mainWindow = new BrowserWindow({
-    width: init.width || FULL_W,
-    height: init.height || FULL_H,
-    x: init.x,
-    y: init.y,
+    width,
+    height,
+    x: display.bounds.x,
+    y: display.bounds.y,
     minWidth: 1024,
     minHeight: 700,
-    backgroundColor: "#03070f",
+    backgroundColor: "#080D14",
     show: false,
     frame: false,
+    transparent: false,
+    fullscreen: true,
+    simpleFullscreen: process.platform === "darwin",
     titleBarStyle: "hidden",
     autoHideMenuBar: true,
+    resizable: true,
+    maximizable: true,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -312,7 +386,16 @@ function createWindow() {
   } catch { /* older Electron */ }
 
   mainWindow.once("ready-to-show", () => {
+    try { mainWindow.setFullScreen(true); } catch { /* noop */ }
     mainWindow.show();
+    mainWindow.focus();
+  });
+
+  // Stay borderless fullscreen whenever shown.
+  mainWindow.on("show", () => {
+    try {
+      if (!mainWindow.isFullScreen()) mainWindow.setFullScreen(true);
+    } catch { /* noop */ }
   });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -375,7 +458,13 @@ async function loadApp() {
     )}`);
     return;
   }
-  mainWindow.loadURL(BACKEND_URL);
+  // Bust Chromium HTTP cache so web/dist rebuilds always show up.
+  try {
+    await mainWindow.webContents.session.clearCache();
+  } catch (e) {
+    console.warn("[electron] clearCache failed", e);
+  }
+  mainWindow.loadURL(`${BACKEND_URL}/?_=${Date.now()}`);
 }
 
 // ── IPC ───────────────────────────────────────────────────────────────────
@@ -701,9 +790,13 @@ if (!singleInstance) {
         try { overlayWindow.setBounds(virtualDisplayBounds()); } catch { /* noop */ }
       }
     };
-    screen.on("display-added", refitOverlay);
-    screen.on("display-removed", refitOverlay);
-    screen.on("display-metrics-changed", refitOverlay);
+    const onDisplayChange = () => {
+      refitOverlay();
+      ensureMainWindowOnScreen();
+    };
+    screen.on("display-added", onDisplayChange);
+    screen.on("display-removed", onDisplayChange);
+    screen.on("display-metrics-changed", onDisplayChange);
 
     app.on("activate", () => {
       if (BrowserWindow.getAllWindows().length === 0) {

@@ -166,10 +166,21 @@ def create_app(
 
         index = web_dist / "index.html"
 
+        def _html(path: Path) -> FileResponse:
+            # Prevent Electron/Chromium from sticky-caching the SPA shell.
+            return FileResponse(
+                path,
+                headers={
+                    "Cache-Control": "no-cache, no-store, must-revalidate",
+                    "Pragma": "no-cache",
+                    "Expires": "0",
+                },
+            )
+
         @app.get("/")
         async def index_route():
             if index.exists():
-                return FileResponse(index)
+                return _html(index)
             return JSONResponse({"error": "frontend not built. run: cd web && npm install && npm run build"})
 
         # SPA fallback — any non-/api/* path returns index.html
@@ -177,12 +188,17 @@ def create_app(
         async def spa(full_path: str):
             target = web_dist / full_path
             if target.is_file():
+                if target.suffix.lower() in {".html", ".js", ".css"}:
+                    return FileResponse(
+                        target,
+                        headers={"Cache-Control": "no-cache"},
+                    )
                 return FileResponse(target)
             # Dev/fallback: serve files from web/public (desktop-overlay.html, models).
             public = cfg.project_root / "web" / "public" / full_path
             if public.is_file():
                 return FileResponse(public)
-            return FileResponse(index) if index.exists() else JSONResponse({"error": "not found"}, status_code=404)
+            return _html(index) if index.exists() else JSONResponse({"error": "not found"}, status_code=404)
     else:
         @app.get("/")
         async def no_frontend():

@@ -69,7 +69,7 @@ export default function DropZone() {
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
-          className="fixed inset-0 z-[300] pointer-events-none flex items-center justify-center bg-jarvis-ink/70 backdrop-blur-sm"
+          className="fixed inset-0 z-[300] pointer-events-none flex items-center justify-center bg-jarvis-ink/75"
         >
           <div className="holo-panel p-8 text-center relative">
             <div className="text-display text-jarvis-aqua text-2xl tracking-widest glow-text mb-3">

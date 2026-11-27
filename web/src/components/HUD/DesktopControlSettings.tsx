@@ -170,9 +170,12 @@ export default function DesktopControlSettings() {
           />
         </div>
         <p className="mt-2 text-[11px] text-jarvis-ice/45 leading-snug">
-          Index tip cursor · approach locks · short pinch=click · hold+move=drag · 2×pinch=right · fist=window · 2 fing=scroll
+          Index tip = cursor · pinch freezes tip + click · hold+move=drag · 2×pinch=right · fist=window · 2 fing=scroll
         </p>
       </div>
+
+      {/* New tracking stack — keep above the fold so rebuilds are obvious */}
+      <TrackingPrecisionPanel />
 
       {/* Overlay viz */}
       <div>
@@ -210,30 +213,6 @@ export default function DesktopControlSettings() {
         </div>
       </div>
 
-      {/* Legacy backend feel (WS path) — primary tuning is Tracking & Precision */}
-      <div className="space-y-3">
-        <SliderRow
-          label="Backend sensitivity"
-          value={sensitivity}
-          min={0.4}
-          max={2.2}
-          step={0.05}
-          onChange={setSensitivity}
-          onCommit={(v) => void apply({ sensitivity: v })}
-        />
-        <SliderRow
-          label="Backend smooth"
-          value={smoothing}
-          min={0}
-          max={0.85}
-          step={0.05}
-          onChange={setSmoothing}
-          onCommit={(v) => void apply({ smoothing: v })}
-        />
-      </div>
-
-      <TrackingPrecisionPanel />
-
       <div className="grid grid-cols-2 gap-2">
         <SegBtn
           label={paused ? "Resume" : "Pause"}
@@ -252,6 +231,28 @@ export default function DesktopControlSettings() {
             setPaused(true);
             sendDesktopControlAction("emergency_stop");
           }}
+        />
+      </div>
+
+      {/* Legacy backend feel (WS path) — primary tuning is Tracking & Precision above */}
+      <div className="space-y-3">
+        <SliderRow
+          label="Backend sensitivity"
+          value={sensitivity}
+          min={0.4}
+          max={2.2}
+          step={0.05}
+          onChange={setSensitivity}
+          onCommit={(v) => void apply({ sensitivity: v })}
+        />
+        <SliderRow
+          label="Backend smooth"
+          value={smoothing}
+          min={0}
+          max={0.85}
+          step={0.05}
+          onChange={setSmoothing}
+          onCommit={(v) => void apply({ smoothing: v })}
         />
       </div>
     </div>

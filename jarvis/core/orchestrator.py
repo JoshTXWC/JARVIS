@@ -643,6 +643,7 @@ class Orchestrator:
 
             stream_began = False
             get_task: asyncio.Task | None = None
+            reply: BrainReply | None = None
             try:
                 while True:
                     # Race: next delta vs stream completion.
@@ -673,7 +674,7 @@ class Orchestrator:
                                 yield Event(EventKind.STREAM_BEGIN)
                             yield Event(EventKind.STREAM_DELTA, text=piece)
                         break
-                reply: BrainReply = stream_task.result()
+                reply = stream_task.result()
             except asyncio.CancelledError:
                 # Cancel + drain BOTH child tasks so neither leaks as
                 # "pending Task destroyed" warnings on GC.
@@ -691,7 +692,23 @@ class Orchestrator:
                 raise
             finally:
                 if stream_began:
-                    yield Event(EventKind.STREAM_END)
+                    usage_payload: dict = {}
+                    if reply is not None and getattr(reply, "usage", None):
+                        usage_payload = reply.usage.as_dict()
+                    if reply is not None and getattr(reply, "reasoning", None):
+                        usage_payload = {**usage_payload, "reasoning": reply.reasoning}
+                    yield Event(EventKind.STREAM_END, payload=usage_payload)
+
+            if reply is None:
+                yield Event(EventKind.ERROR, text="[brain error] empty stream reply")
+                yield Event(EventKind.DONE)
+                return
+
+            if getattr(reply, "reasoning", None):
+                yield Event(EventKind.REASONING, text=reply.reasoning)
+
+            if getattr(reply, "usage", None):
+                yield Event(EventKind.USAGE, payload=reply.usage.as_dict())
 
             assistant_text = clean_assistant_text(reply.text)
             # Brain transport failures must never enter chat/TTS — terminal only.
@@ -742,7 +759,12 @@ class Orchestrator:
 
                 self._history.append({"role": "assistant", "content": reply.raw or assistant_text})
                 self.memory.append_message("assistant", assistant_text)
-                yield Event(EventKind.ASSISTANT, text=assistant_text)
+                assist_payload: dict = {}
+                if getattr(reply, "usage", None):
+                    assist_payload.update(reply.usage.as_dict())
+                if getattr(reply, "reasoning", None):
+                    assist_payload["reasoning"] = reply.reasoning
+                yield Event(EventKind.ASSISTANT, text=assistant_text, payload=assist_payload)
 
                 # Self-reflection: for a planned task, verify completion ONCE.
                 # If a concrete step still remains, inject it and keep going;

@@ -1,0 +1,17 @@
+{
+  "id": "7f617088e1c9",
+  "state": "completed",
+  "created_at": 1795662735.3440561,
+  "updated_at": 1795662736.58169,
+  "goal": "Can you search youtube for a video about Tornadoes?",
+  "error": "",
+  "hops": 1,
+  "checkpoint": {
+    "tool": "video_search",
+    "args_keys": [
+      "max_results",
+      "query"
+    ],
+    "hops": 1
+  }
+}

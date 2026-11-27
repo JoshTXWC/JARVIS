@@ -1,17 +1,12 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useState } from "react";
 import { useStore } from "../../lib/store";
+import JarvisLogo from "../Brand/JarvisLogo";
 
 const LINES = [
-  "INITIALISING J.A.R.V.I.S. KERNEL ...",
-  "LINKING NATURAL-LANGUAGE CORE ...",
-  "CALIBRATING BRITISH VOICE PROFILE ...",
-  "ESTABLISHING SECURE LOCAL UPLINK ...",
-  "MOUNTING MEMORY AND MISSION CONTEXT ...",
-  "DISCOVERING TOOLS AND AGENT PROTOCOLS ...",
-  "ALIGNING HOLOGRAPHIC TELEMETRY ...",
-  "RUNNING PRE-FLIGHT DIAGNOSTICS ...",
-  "READY.",
+  "Initializing core…",
+  "Linking voice…",
+  "Systems ready.",
 ];
 
 export default function BootSequence() {
@@ -22,10 +17,10 @@ export default function BootSequence() {
   useEffect(() => {
     if (booted) return;
     if (i < LINES.length) {
-      const t = setTimeout(() => setI(i + 1), 240 + Math.random() * 130);
+      const t = setTimeout(() => setI(i + 1), 280 + Math.random() * 120);
       return () => clearTimeout(t);
     }
-    const t = setTimeout(() => setBooted(true), 450);
+    const t = setTimeout(() => setBooted(true), 400);
     return () => clearTimeout(t);
   }, [i, booted, setBooted]);
 
@@ -35,49 +30,37 @@ export default function BootSequence() {
         <motion.div
           initial={{ opacity: 1 }}
           exit={{ opacity: 0 }}
-          transition={{ duration: 0.6 }}
-          className="fixed inset-0 z-[1000] bg-jarvis-ink flex items-center justify-center vignette"
+          transition={{ duration: 0.5 }}
+          className="fixed inset-0 z-[1000] bg-black flex items-center justify-center"
         >
-          <div className="text-center space-y-6">
-            <div className="relative w-40 h-40 mx-auto">
-              <motion.div
-                className="absolute inset-0 rounded-full border-2 border-jarvis-cyan/60"
-                animate={{ rotate: 360 }}
-                transition={{ duration: 2, repeat: Infinity, ease: "linear" }}
+          <div className="text-center space-y-8">
+            <div className="relative w-28 h-28 mx-auto grid place-items-center">
+              <div
+                className="absolute inset-[-18%] rounded-full animate-orb_pulse"
+                style={{ background: "radial-gradient(circle, rgba(56,189,248,0.22), transparent 70%)" }}
               />
               <motion.div
-                className="absolute inset-4 rounded-full border border-jarvis-aqua/50"
-                animate={{ rotate: -360 }}
-                transition={{ duration: 3, repeat: Infinity, ease: "linear" }}
-              />
-              <motion.div
-                className="absolute inset-12 rounded-full bg-jarvis-cyan/40"
-                animate={{ scale: [1, 1.3, 1], opacity: [0.6, 1, 0.6] }}
-                transition={{ duration: 1.4, repeat: Infinity }}
-              />
-              <div className="absolute inset-0 flex items-center justify-center text-display text-jarvis-cyan tracking-widest text-xs glow-text">
-                J.A.R.V.I.S.
-              </div>
+                animate={{ scale: [1, 1.04, 1], opacity: [0.92, 1, 0.92] }}
+                transition={{ duration: 2.4, repeat: Infinity, ease: "easeInOut" }}
+              >
+                <JarvisLogo size={112} className="drop-shadow-[0_0_24px_rgba(125,211,252,0.35)]" />
+              </motion.div>
             </div>
 
-            <div className="text-mono text-xs text-jarvis-cyan/70 space-y-1 text-left min-w-[380px]">
+            <div className="font-display text-2xl tracking-[0.2em] text-foreground glow-text">
+              J.A.R.V.I.S.
+            </div>
+
+            <div className="font-mono text-[11px] text-muted-foreground space-y-1.5 min-w-[220px]">
               {LINES.slice(0, i).map((line, idx) => (
                 <motion.div
                   key={idx}
-                  initial={{ opacity: 0, x: -8 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  className="flex items-center gap-2"
+                  initial={{ opacity: 0, y: 4 }}
+                  animate={{ opacity: 1, y: 0 }}
                 >
-                  <span className="text-jarvis-ok">&gt;</span>
-                  <span>{line}</span>
+                  {line}
                 </motion.div>
               ))}
-              {i < LINES.length && (
-                <div className="flex items-center gap-2 animate-pulse">
-                  <span className="text-jarvis-cyan">&gt;</span>
-                  <span className="text-jarvis-aqua">{LINES[i]}</span>
-                </div>
-              )}
             </div>
           </div>
         </motion.div>

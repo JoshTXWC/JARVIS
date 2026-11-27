@@ -752,6 +752,9 @@ async def select_image_model_endpoint(request: Request, body: ImageModelSelectBo
         return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
 
 
+REASONING_LEVELS = ("none", "low", "medium", "high")
+
+
 @router.get("/models")
 async def list_llm_models(request: Request):
     """Curated model assortment + installed endpoint models + hardware fit."""
@@ -787,12 +790,398 @@ async def list_llm_models(request: Request):
         gpu_vendor=gpu.get("vendor"),
         shared_memory=bool(gpu.get("shared_memory")),
     )
+    effort = (getattr(cfg.model, "reasoning_effort", None) or "none").lower().strip() or "none"
     payload.update({
         "provider": cfg.model.provider,
         "endpoint": cfg.model.endpoint,
         "installed": installed,
+        "reasoning_effort": effort if effort in REASONING_LEVELS else "none",
+        "reasoning_levels": list(REASONING_LEVELS),
     })
     return payload
+
+
+def _ollama_native_base(cfg) -> str:
+    """Derive Ollama's native HTTP root (…:11434) from configured endpoints."""
+    for ep in (getattr(cfg.model, "local_endpoint", None), getattr(cfg.model, "endpoint", None)):
+        ep = (ep or "").rstrip("/")
+        if "11434" in ep:
+            return ep.replace("/v1", "") if ep.endswith("/v1") else ep
+    return "http://127.0.0.1:11434"
+
+
+def _llama_cpp_base(cfg) -> str | None:
+    """Best-effort llama.cpp server root when endpoint looks like one."""
+    ep = (getattr(cfg.model, "endpoint", None) or "").rstrip("/")
+    if not ep:
+        return None
+    # Native OpenAI shim is usually http://host:8080/v1
+    if ep.endswith("/v1"):
+        return ep[:-3]
+    return ep
+
+
+def _persist_model_field(key: str, value: str) -> bool:
+    """Surgical write under the top-level `model:` block in config.yaml."""
+    try:
+        from ..config import DEFAULT_CONFIG_PATH
+        path = DEFAULT_CONFIG_PATH
+        text = path.read_text(encoding="utf-8")
+        updated, n = re.subn(
+            rf"(?m)^(model:\s*\n(?:  .*\n)*?  {re.escape(key)}:\s*)([^\n#]+)",
+            lambda m: m.group(1) + value,
+            text,
+            count=1,
+        )
+        if n:
+            path.write_text(updated, encoding="utf-8")
+            return True
+        # Insert after max_tokens if the key is missing.
+        updated, n = re.subn(
+            r"(?m)^(model:\s*\n(?:  .*\n)*?  max_tokens:\s*[^\n]+\n)",
+            rf"\1  {key}: {value}\n",
+            text,
+            count=1,
+        )
+        if n:
+            path.write_text(updated, encoding="utf-8")
+            return True
+    except Exception as e:  # noqa: BLE001
+        logging.getLogger("jarvis.api").warning("persist model.%s failed: %s", key, e)
+    return False
+
+
+@router.get("/models/loaded")
+async def list_loaded_models(request: Request):
+    """Resident + available models (Ollama /api/ps or llama.cpp router)."""
+    cfg = request.app.state.cfg
+    loaded: list[dict] = []
+    available: list[dict] = []
+    source = "none"
+    context_length = None
+    effort = (getattr(cfg.model, "reasoning_effort", None) or "none").lower().strip() or "none"
+
+    # Ollama runners
+    ollama = _ollama_native_base(cfg)
+    try:
+        async with httpx.AsyncClient(timeout=2.5) as client:
+            r = await client.get(f"{ollama}/api/ps")
+            if r.status_code == 200:
+                source = "ollama"
+                for m in (r.json() or {}).get("models") or []:
+                    name = (m.get("name") or m.get("model") or "").strip()
+                    if not name:
+                        continue
+                    size = int(m.get("size") or 0)
+                    size_vram = int(m.get("size_vram") or 0)
+                    details = m.get("details") or {}
+                    entry = {
+                        "id": name,
+                        "name": name,
+                        "backend": "ollama",
+                        "status": "loaded",
+                        "size_bytes": size,
+                        "size_vram_bytes": size_vram,
+                        "size_gb": round(size / 1e9, 2) if size else None,
+                        "size_vram_gb": round(size_vram / 1e9, 2) if size_vram else None,
+                        "family": details.get("family") or details.get("parent_model"),
+                        "parameter_size": details.get("parameter_size"),
+                        "quantization": details.get("quantization_level"),
+                        "expires_at": m.get("expires_at"),
+                        "unloadable": True,
+                        "loadable": False,
+                    }
+                    try:
+                        show = await client.post(f"{ollama}/api/show", json={"name": name})
+                        if show.status_code == 200:
+                            info = (show.json() or {}).get("model_info") or {}
+                            for k, v in info.items():
+                                if str(k).endswith("context_length") and isinstance(v, (int, float)):
+                                    entry["context_length"] = int(v)
+                                    context_length = context_length or int(v)
+                                    break
+                    except Exception:  # noqa: BLE001
+                        pass
+                    loaded.append(entry)
+
+            # Installed-but-not-resident Ollama tags (loadable)
+            try:
+                tags = await client.get(f"{ollama}/api/tags")
+                if tags.status_code == 200:
+                    resident = {e["id"] for e in loaded}
+                    for m in (tags.json() or {}).get("models") or []:
+                        name = (m.get("name") or m.get("model") or "").strip()
+                        if not name or name in resident:
+                            continue
+                        details = m.get("details") or {}
+                        available.append({
+                            "id": name,
+                            "name": name,
+                            "backend": "ollama",
+                            "status": "unloaded",
+                            "parameter_size": details.get("parameter_size"),
+                            "quantization": details.get("quantization_level"),
+                            "family": details.get("family"),
+                            "unloadable": False,
+                            "loadable": True,
+                        })
+                    if available and source == "none":
+                        source = "ollama"
+            except Exception:  # noqa: BLE001
+                pass
+    except Exception as e:  # noqa: BLE001
+        logging.getLogger("jarvis.api").debug("ollama /api/ps failed: %s", e)
+
+    # llama.cpp router — prefer this when endpoint points at llama-server
+    base = _llama_cpp_base(cfg)
+    if base and "11434" not in base:
+        try:
+            async with httpx.AsyncClient(timeout=2.5) as client:
+                for path in ("/models", "/v1/models"):
+                    try:
+                        r = await client.get(f"{base}{path}")
+                    except Exception:  # noqa: BLE001
+                        continue
+                    if r.status_code != 200:
+                        continue
+                    data = r.json()
+                    items = data.get("data") or data.get("models") or []
+                    if not items and path != "/models":
+                        continue
+                    source = "llama.cpp"
+                    loaded = []
+                    available = []
+                    for item in items:
+                        mid = item.get("id") or item.get("name") or item.get("model")
+                        if not mid:
+                            continue
+                        status = (item.get("status") or "loaded").lower()
+                        entry = {
+                            "id": mid,
+                            "name": mid,
+                            "backend": "llama.cpp",
+                            "status": status,
+                            "unloadable": status in {"loaded", "loading", "sleeping"},
+                            "loadable": status in {"unloaded", "missing", ""},
+                        }
+                        if status in {"unloaded", "missing"}:
+                            available.append(entry)
+                        else:
+                            loaded.append(entry)
+                    break
+                # props for context
+                try:
+                    props = await client.get(f"{base}/props")
+                    if props.status_code == 200:
+                        pdata = props.json() or {}
+                        n_ctx = (pdata.get("default_generation_settings") or {}).get("n_ctx")
+                        if n_ctx:
+                            context_length = int(n_ctx)
+                            for e in loaded:
+                                e.setdefault("context_length", int(n_ctx))
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception as e:  # noqa: BLE001
+            logging.getLogger("jarvis.api").debug("llama.cpp loaded probe failed: %s", e)
+
+    if not context_length:
+        context_length = 8192
+
+    return {
+        "ok": True,
+        "source": source,
+        "loaded": loaded,
+        "available": available,
+        "context_length": context_length,
+        "selected": cfg.model.model,
+        "endpoint": cfg.model.endpoint,
+        "reasoning_effort": effort if effort in REASONING_LEVELS else "none",
+        "reasoning_levels": list(REASONING_LEVELS),
+    }
+
+
+class LlmModelUnloadBody(BaseModel):
+    model: str
+
+
+class LlmModelLoadBody(BaseModel):
+    model: str
+
+
+class LlmReasoningBody(BaseModel):
+    effort: str
+
+
+@router.post("/models/unload")
+async def unload_llm_model(request: Request, body: LlmModelUnloadBody):
+    """Evict a resident model from Ollama or llama.cpp to free VRAM."""
+    cfg = request.app.state.cfg
+    name = (body.model or "").strip()
+    if not name:
+        return JSONResponse({"ok": False, "error": "model required"}, status_code=400)
+
+    errors: list[str] = []
+
+    # Prefer llama.cpp when the active endpoint is not Ollama.
+    base = _llama_cpp_base(cfg)
+    ep = (cfg.model.endpoint or "")
+    prefer_llama = base and "11434" not in ep
+    if prefer_llama:
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                r = await client.post(f"{base}/models/unload", json={"model": name})
+                if r.status_code < 400:
+                    return {"ok": True, "unloaded": name, "backend": "llama.cpp"}
+                errors.append(f"llama.cpp HTTP {r.status_code}: {r.text[:200]}")
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"llama.cpp: {e}")
+
+    # Ollama
+    ollama = _ollama_native_base(cfg)
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            r = await client.post(
+                f"{ollama}/api/generate",
+                json={"model": name, "keep_alive": 0, "prompt": ""},
+            )
+            if r.status_code < 400:
+                return {"ok": True, "unloaded": name, "backend": "ollama"}
+            errors.append(f"ollama HTTP {r.status_code}")
+    except Exception as e:  # noqa: BLE001
+        errors.append(f"ollama: {e}")
+
+    # llama.cpp fallback if we tried Ollama first
+    if not prefer_llama and base and "11434" not in base:
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                r = await client.post(f"{base}/models/unload", json={"model": name})
+                if r.status_code < 400:
+                    return {"ok": True, "unloaded": name, "backend": "llama.cpp"}
+                errors.append(f"llama.cpp HTTP {r.status_code}")
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"llama.cpp: {e}")
+
+    return JSONResponse(
+        {"ok": False, "error": "; ".join(errors) or "unload failed"},
+        status_code=400,
+    )
+
+
+@router.post("/models/load")
+async def load_llm_model(request: Request, body: LlmModelLoadBody):
+    """Load a model into memory (llama.cpp router or Ollama keep_alive)."""
+    cfg = request.app.state.cfg
+    name = (body.model or "").strip()
+    if not name:
+        return JSONResponse({"ok": False, "error": "model required"}, status_code=400)
+
+    errors: list[str] = []
+    base = _llama_cpp_base(cfg)
+    ep = (cfg.model.endpoint or "")
+    prefer_llama = base and "11434" not in ep
+
+    if prefer_llama:
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                r = await client.post(f"{base}/models/load", json={"model": name})
+                if r.status_code < 400:
+                    return {"ok": True, "loaded": name, "backend": "llama.cpp"}
+                errors.append(f"llama.cpp HTTP {r.status_code}: {r.text[:200]}")
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"llama.cpp: {e}")
+
+    # Ollama: touch the model so it becomes resident
+    ollama = _ollama_native_base(cfg)
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            r = await client.post(
+                f"{ollama}/api/generate",
+                json={"model": name, "keep_alive": "30m", "prompt": ""},
+            )
+            if r.status_code < 400:
+                return {"ok": True, "loaded": name, "backend": "ollama"}
+            errors.append(f"ollama HTTP {r.status_code}")
+    except Exception as e:  # noqa: BLE001
+        errors.append(f"ollama: {e}")
+
+    if not prefer_llama and base and "11434" not in base:
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                r = await client.post(f"{base}/models/load", json={"model": name})
+                if r.status_code < 400:
+                    return {"ok": True, "loaded": name, "backend": "llama.cpp"}
+                errors.append(f"llama.cpp HTTP {r.status_code}")
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"llama.cpp: {e}")
+
+    return JSONResponse(
+        {"ok": False, "error": "; ".join(errors) or "load failed"},
+        status_code=400,
+    )
+
+
+@router.post("/models/reasoning")
+async def set_reasoning_effort(request: Request, body: LlmReasoningBody):
+    """Set chat reasoning_effort (none/low/medium/high) for llama.cpp / OpenAI-compat."""
+    cfg = request.app.state.cfg
+    effort = (body.effort or "").strip().lower()
+    if effort not in REASONING_LEVELS:
+        return JSONResponse(
+            {"ok": False, "error": f"effort must be one of {', '.join(REASONING_LEVELS)}"},
+            status_code=400,
+        )
+    cfg.model.reasoning_effort = None if effort == "none" else effort
+    persisted = _persist_model_field("reasoning_effort", effort)
+    return {
+        "ok": True,
+        "reasoning_effort": effort,
+        "persisted": persisted,
+    }
+
+
+class LlmModelPullBody(BaseModel):
+    model: str
+
+
+@router.post("/models/pull")
+async def pull_llm_model(request: Request, body: LlmModelPullBody):
+    """Download a local model via `ollama pull` (best-effort)."""
+    import asyncio
+    import shutil
+
+    name = (body.model or "").strip()
+    if not name:
+        return JSONResponse({"ok": False, "error": "model required"}, status_code=400)
+
+    # Strip a leading `ollama pull ` if a catalog pull string was passed through.
+    if name.lower().startswith("ollama pull "):
+        name = name[12:].strip()
+
+    ollama_bin = shutil.which("ollama")
+    if not ollama_bin:
+        return JSONResponse(
+            {"ok": False, "error": "ollama CLI not found on PATH"},
+            status_code=400,
+        )
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            ollama_bin,
+            "pull",
+            name,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        out_b, _ = await proc.communicate()
+        out = (out_b or b"").decode("utf-8", "replace")[-2000:]
+        if proc.returncode != 0:
+            return JSONResponse(
+                {"ok": False, "error": out.strip() or f"ollama pull failed ({proc.returncode})"},
+                status_code=400,
+            )
+        return {"ok": True, "pulled": name, "log": out.strip()[-500:]}
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
 
 
 @router.post("/models/select")

@@ -25,7 +25,11 @@ import {
   openCamera,
 } from "../../lib/hands/handsPipeline";
 import { OneEuroFilter2D } from "../../lib/hands/oneEuro";
-import { PrecisionController, type ScreenRect } from "../../lib/hands/precisionControl";
+import {
+  normalizedPinch,
+  PrecisionController,
+  type ScreenRect,
+} from "../../lib/hands/precisionControl";
 import {
   loadTrackingSettings,
   type TrackingQualitySettings,
@@ -65,9 +69,11 @@ function isFingerFolded(
 
 function handLabel(
   landmarks: Array<{ x: number; y: number; z: number }>,
+  pinchActivate = 0.28,
 ): "pinch" | "fist" | "open" {
-  const pinch = dist(landmarks[8], landmarks[4]) < 0.06;
-  if (pinch) return "pinch";
+  if (landmarks.length >= 21 && normalizedPinch(landmarks) <= pinchActivate) {
+    return "pinch";
+  }
   const fist =
     isFingerFolded(landmarks, 8, 5) &&
     isFingerFolded(landmarks, 12, 9) &&
@@ -135,6 +141,8 @@ export default function GestureOverlay() {
   const lastPinchRef = useRef([false, false]);
   const dragIdRef = useRef<string | null>(null);
   const lastCursorRef = useRef<Pt>({ x: 0, y: 0 });
+  /** Last open index-tip per hand — HUD cursor freezes here during pinch. */
+  const openTipRef = useRef<[Pt | null, Pt | null]>([null, null]);
   const vizFiltersRef = useRef<[OneEuroFilter2D, OneEuroFilter2D]>([
     new OneEuroFilter2D(),
     new OneEuroFilter2D(),
@@ -312,10 +320,11 @@ export default function GestureOverlay() {
             mode: "pinch" | "fist" | "open";
             tip: Pt;
           }[] = [];
+          const tracking = trackingRef.current;
 
           for (let i = 0; i < Math.min(2, orderedHands.length); i++) {
             const landmarks = orderedHands[i];
-            const mode = handLabel(landmarks);
+            const mode = handLabel(landmarks, tracking.pinchActivate);
             const raw = cameraToPreview(
               landmarks[8].x,
               landmarks[8].y,
@@ -326,12 +335,32 @@ export default function GestureOverlay() {
               true,
             );
             // Separate viz filter — does not drive desktop cursor.
-            const tip = vizFiltersRef.current[i].filter(raw.x, raw.y, now);
+            const liveTip = vizFiltersRef.current[i].filter(raw.x, raw.y, now);
+            const pinchNorm =
+              landmarks.length >= 21 ? normalizedPinch(landmarks) : 1;
+            const closing = pinchNorm <= tracking.pinchApproach;
+
+            // Cursor stays on index tip while open; freeze at that tip for pinch/click.
+            let tip = liveTip;
+            if (mode === "fist") {
+              openTipRef.current[i] = { x: liveTip.x, y: liveTip.y };
+              tip = liveTip;
+            } else if (closing || mode === "pinch") {
+              tip = openTipRef.current[i] ?? liveTip;
+              if (!openTipRef.current[i]) {
+                openTipRef.current[i] = { x: tip.x, y: tip.y };
+              }
+            } else {
+              openTipRef.current[i] = { x: liveTip.x, y: liveTip.y };
+              tip = liveTip;
+            }
+
             primary.push({ mode, tip });
             paintCircle(i, tip, mode);
           }
           for (let i = orderedHands.length; i < 2; i++) {
             vizFiltersRef.current[i].reset();
+            openTipRef.current[i] = null;
             paintCircle(i, null, null);
           }
 
@@ -622,7 +651,8 @@ export default function GestureOverlay() {
         return;
       }
       el.style.opacity = "1";
-      el.style.transform = `translate3d(${pos.x}px, ${pos.y}px, 0) translate(-50%, -50%)`;
+      const scale = mode === "pinch" ? 1.2 : 1;
+      el.style.transform = `translate3d(${pos.x}px, ${pos.y}px, 0) translate(-50%, -50%) scale(${scale})`;
       el.dataset.mode = mode;
     };
 
@@ -741,6 +771,7 @@ export default function GestureOverlay() {
     scaleIdRef.current = null;
     vizFiltersRef.current[0].reset();
     vizFiltersRef.current[1].reset();
+    openTipRef.current = [null, null];
     requestDesktopOverlay(false);
     try {
       delete document.body.dataset.jarvisHands;
@@ -812,7 +843,7 @@ export default function GestureOverlay() {
         }
         .hands-cursor[data-mode="pinch"] {
           background: #e0f2fe;
-          box-shadow: 0 0 12px rgba(224, 242, 254, 0.95);
+          box-shadow: 0 0 14px rgba(224, 242, 254, 1), 0 0 0 6px rgba(59, 158, 255, 0.35);
         }
         .hands-cursor[data-mode="fist"] {
           background: #fbbf24;

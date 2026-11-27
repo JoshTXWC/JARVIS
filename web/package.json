@@ -12,9 +12,15 @@
   "dependencies": {
     "@react-three/drei": "^9.114.0",
     "@react-three/fiber": "^8.17.10",
+    "class-variance-authority": "file:vendor/cva.tgz",
+    "clsx": "file:vendor/clsx.tgz",
     "framer-motion": "^11.11.0",
+    "lucide-react": "file:vendor/lucide-react.tgz",
+    "motion": "^14.14.0",
+    "ogl": "file:vendor/ogl.tgz",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "tailwind-merge": "file:vendor/tailwind-merge.tgz",
     "three": "^0.169.0",
     "zustand": "^5.0.0"
   },

@@ -18,11 +18,12 @@ export type OneEuroParams = {
 };
 
 export const DEFAULT_CURSOR_EURO: OneEuroParams = {
-  minCutoff: 1.2,
-  beta: 0.035,
-  dCutoff: 1.0,
-  deadZone: 0.35,
-  maxJump: 180,
+  // Snappier tip follow so the cursor stays glued to landmark 8 while pointing.
+  minCutoff: 1.7,
+  beta: 0.05,
+  dCutoff: 1.1,
+  deadZone: 0.18,
+  maxJump: 200,
 };
 
 export const DEFAULT_VIZ_EURO: OneEuroParams = {

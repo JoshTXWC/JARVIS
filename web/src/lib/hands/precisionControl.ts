@@ -2,8 +2,10 @@
  * Combined desktop hand control (Mouse + Windows).
  *
  * Cursor = dominant-hand index tip (landmark 8) with One Euro filtering.
- * Pinch approach dampens → early lock → short release = click;
- * hold ~400ms + deliberate move = drag from knuckle/palm anchor.
+ * While fingers are open the cursor stays glued to that tip. As soon as a
+ * pinch approach begins, the cursor freezes at the last open tip so the
+ * physical tip-to-thumb motion does not drag the click point. Short release
+ * = click; hold ~400ms + deliberate move = drag from knuckle/palm anchor.
  * Fist = window drag · two fingers = scroll · quick double short-pinch = right click.
  */
 
@@ -147,6 +149,8 @@ export class PrecisionController {
   private filter = new OneEuroFilter2D(DEFAULT_CURSOR_EURO);
   private cursor: Pt | null = null;
   private lastUv: Pt | null = null;
+  /** Last tip while fingers are open — click/lock target during pinch. */
+  private openTip: Pt | null = null;
 
   private pinchMode: PinchMode = "idle";
   private lockPos: Pt | null = null;
@@ -189,6 +193,7 @@ export class PrecisionController {
     this.filter.reset();
     this.cursor = null;
     this.lastUv = null;
+    this.openTip = null;
     this.pinchMode = "idle";
     this.lockPos = null;
     this.pinchStartMs = 0;
@@ -252,7 +257,7 @@ export class PrecisionController {
 
   /**
    * Returns OS inject ops + viz for this frame.
-   * Cursor tracks landmark 8 (never palm / pinch midpoint).
+   * Cursor tracks landmark 8 while open; freezes at last open tip during pinch.
    */
   frame(
     landmarks: Array<{ x: number; y: number }> | null,
@@ -288,6 +293,7 @@ export class PrecisionController {
     const approach = clamp01(
       1 - (pinchNorm - s.pinchActivate) / Math.max(1e-6, s.pinchApproach - s.pinchActivate),
     );
+    const fingersClosing = pinchNorm <= s.pinchApproach;
 
     // Control UV from landmark 8, then One Euro in desktop pixels.
     const uvRaw = cameraToControl(landmarks[8].x, landmarks[8].y, cal, opts);
@@ -319,8 +325,20 @@ export class PrecisionController {
     this.lastUv = uvRaw;
 
     const rawTip = controlToDesktop(uvRaw.x, uvRaw.y, screen);
-    const filtered = this.filter.filter(rawTip.x, rawTip.y, nowMs);
-    const smoothed: Pt = { x: filtered.x, y: filtered.y };
+    // Only feed the filter while fingers are open so pinch tip motion
+    // cannot pull the cursor. Frozen frames hold the last open tip.
+    let smoothed: Pt;
+    if (fingersClosing) {
+      const freeze =
+        this.lockPos ?? this.openTip ?? this.cursor ?? rawTip;
+      if (!this.openTip) this.openTip = { ...freeze };
+      this.filter.reset(freeze);
+      smoothed = { ...freeze };
+    } else {
+      const filtered = this.filter.filter(rawTip.x, rawTip.y, nowMs);
+      smoothed = { x: filtered.x, y: filtered.y };
+      this.openTip = { ...smoothed };
+    }
     const anchor = handAnchor(landmarks, screen, cal, opts);
 
     const ops: InjectOp[] = [];
@@ -337,6 +355,10 @@ export class PrecisionController {
         this.didDrag = false;
       }
       this.releasing = false;
+      // Fist folds the index tip — follow filtered tip for window grab.
+      const filtered = this.filter.filter(rawTip.x, rawTip.y, nowMs);
+      smoothed = { x: filtered.x, y: filtered.y };
+      this.openTip = { ...smoothed };
       this.cursor = smoothed;
       ops.push({ op: "move", x: Math.round(smoothed.x), y: Math.round(smoothed.y) });
       if (!this.wasFist) {
@@ -373,6 +395,9 @@ export class PrecisionController {
         this.lockPos = null;
       }
       this.releasing = false;
+      const filtered = this.filter.filter(rawTip.x, rawTip.y, nowMs);
+      smoothed = { x: filtered.x, y: filtered.y };
+      this.openTip = { ...smoothed };
       this.cursor = smoothed;
       ops.push({ op: "move", x: Math.round(smoothed.x), y: Math.round(smoothed.y) });
       if (this.scrollAnchorY == null) {
@@ -395,14 +420,17 @@ export class PrecisionController {
     }
     this.scrollAnchorY = null;
 
-    // —— Smooth release blend back to tip ——
+    // —— Smooth release blend back to live tip ——
     if (this.releasing && this.releaseFrom) {
+      const live = this.filter.filter(rawTip.x, rawTip.y, nowMs);
+      const liveTip = { x: live.x, y: live.y };
       const t = clamp01((nowMs - this.releaseStartMs) / RELEASE_BLEND_MS);
       const blended = {
-        x: lerp(this.releaseFrom.x, smoothed.x, t),
-        y: lerp(this.releaseFrom.y, smoothed.y, t),
+        x: lerp(this.releaseFrom.x, liveTip.x, t),
+        y: lerp(this.releaseFrom.y, liveTip.y, t),
       };
       this.cursor = blended;
+      this.openTip = { ...blended };
       ops.push({ op: "move", x: Math.round(blended.x), y: Math.round(blended.y) });
       if (t >= 1) {
         this.releasing = false;
@@ -429,12 +457,14 @@ export class PrecisionController {
 
     if (wantLock) {
       if (this.pinchMode === "idle") {
-        this.lockPos = { ...(this.cursor ?? smoothed) };
+        // Always lock at last open index tip — never the curled pinch tip.
+        this.lockPos = {
+          ...(this.openTip ?? this.cursor ?? smoothed),
+        };
         this.pinchMode = "locked";
         this.pinchStartMs = nowMs;
         this.dragAnchor0 = { ...anchor };
         this.didDrag = false;
-        // Freeze filter at lock so release doesn't inherit pinch velocity.
         this.filter.reset(this.lockPos);
       }
 
@@ -484,6 +514,7 @@ export class PrecisionController {
         };
       }
 
+      // Hold still at tip — pinch only indicates click/lock, does not move cursor.
       this.cursor = lock;
       ops.push({ op: "move", x: Math.round(lock.x), y: Math.round(lock.y) });
       const phase: CursorPhase =
@@ -507,7 +538,7 @@ export class PrecisionController {
 
     if (this.pinchMode !== "idle") {
       this.endPinchGesture(nowMs, ops);
-      const c = this.cursor ?? smoothed;
+      const c = this.cursor ?? this.openTip ?? smoothed;
       ops.push({ op: "move", x: Math.round(c.x), y: Math.round(c.y) });
       const uv = desktopToUv(c, screen);
       return {
@@ -518,26 +549,37 @@ export class PrecisionController {
       };
     }
 
-    // —— Normal pointing with approach dampening ——
-    let target = smoothed;
-    if (approach > 0 && pinchNorm > s.pinchActivate) {
-      const damp = 1 - approach * 0.92;
-      if (this.cursor) {
-        target = {
-          x: this.cursor.x + (target.x - this.cursor.x) * damp,
-          y: this.cursor.y + (target.y - this.cursor.y) * damp,
-        };
-      }
+    // —— Approach: freeze at last open tip (no tip-drag into the pinch) ——
+    if (fingersClosing) {
+      const held = this.openTip ?? this.cursor ?? smoothed;
+      this.cursor = held;
+      ops.push({ op: "move", x: Math.round(held.x), y: Math.round(held.y) });
+      const uv = desktopToUv(held, screen);
+      return {
+        ops,
+        pose: "approach",
+        cursor: held,
+        viz: {
+          phase: "approach",
+          u: uv.x,
+          v: uv.y,
+          approach: Math.max(approach, 0.2),
+          hold: 0,
+          locked: false,
+          quality,
+        },
+      };
     }
-    this.cursor = target;
-    ops.push({ op: "move", x: Math.round(target.x), y: Math.round(target.y) });
-    const phase: CursorPhase = approach > 0.15 ? "approach" : "point";
-    const uv = desktopToUv(target, screen);
+
+    // —— Normal pointing: cursor glued to index tip ——
+    this.cursor = smoothed;
+    ops.push({ op: "move", x: Math.round(smoothed.x), y: Math.round(smoothed.y) });
+    const uv = desktopToUv(smoothed, screen);
     return {
       ops,
-      pose: phase === "approach" ? "approach" : "point",
-      cursor: target,
-      viz: { phase, u: uv.x, v: uv.y, approach, hold: 0, quality },
+      pose: "point",
+      cursor: smoothed,
+      viz: { phase: "point", u: uv.x, v: uv.y, approach: 0, hold: 0, quality },
     };
   }
 }

@@ -461,13 +461,25 @@ async def _emit_event(send, ev: Event, pending: dict[str, asyncio.Future]) -> No
     send = tagged_send  # shadow within this function only
 
     if ev.kind is EventKind.ASSISTANT:
-        await send({"type": "assistant", "text": ev.text})
+        msg = {"type": "assistant", "text": ev.text}
+        if ev.payload:
+            msg.update({k: v for k, v in ev.payload.items() if k != "items"})
+        await send(msg)
     elif ev.kind is EventKind.STREAM_BEGIN:
         await send({"type": "stream_begin"})
     elif ev.kind is EventKind.STREAM_DELTA:
         await send({"type": "stream_delta", "text": ev.text})
     elif ev.kind is EventKind.STREAM_END:
-        await send({"type": "stream_end"})
+        msg = {"type": "stream_end"}
+        if ev.payload:
+            msg["usage"] = {k: v for k, v in ev.payload.items() if k != "reasoning"}
+            if ev.payload.get("reasoning"):
+                msg["reasoning"] = ev.payload["reasoning"]
+        await send(msg)
+    elif ev.kind is EventKind.USAGE:
+        await send({"type": "usage", **(ev.payload or {})})
+    elif ev.kind is EventKind.REASONING:
+        await send({"type": "reasoning", "text": ev.text})
     elif ev.kind is EventKind.THINKING:
         await send({"type": "thinking"})
     elif ev.kind is EventKind.TOOL_PROPOSED:

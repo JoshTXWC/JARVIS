@@ -1,0 +1,10 @@
+{
+  "id": "a079bb893565",
+  "state": "running",
+  "created_at": 1795653970.9474485,
+  "updated_at": 1795653970.99708,
+  "goal": "Open Visual Studio Code.",
+  "error": "",
+  "hops": 0,
+  "checkpoint": {}
+}

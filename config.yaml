@@ -151,7 +151,7 @@ model:
   #   Gemini 2.5 Flash/Pro  → GEMINI_API_KEY → Google OpenAI-compatible route
   provider: openai_compatible
   endpoint: http://localhost:11434/v1
-  model: auto
+  model: qwen2.5:1.5b
   api_key_env: OLLAMA_API_KEY
   # Restored when leaving a cloud model via the switcher.
   local_endpoint: http://localhost:11434/v1
@@ -160,7 +160,7 @@ model:
   max_tokens: 4096
   request_timeout_seconds: 300
   native_tool_calls: true
-  reasoning_effort: none
+  reasoning_effort: low
 
 image_model:
   # Selectable in the JARVIS command bar. Options:

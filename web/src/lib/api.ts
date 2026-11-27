@@ -139,6 +139,8 @@ export interface LlmModelsResponse {
   };
   skills?: { id: string; label: string }[];
   models: LlmModelInfo[];
+  reasoning_effort?: string;
+  reasoning_levels?: string[];
 }
 
 export async function getLlmModels(): Promise<LlmModelsResponse> {
@@ -171,6 +173,136 @@ export async function selectLlmModel(model: string): Promise<{
     return data;
   } catch (e: any) {
     return { ok: false, error: e?.message || "Network error selecting model" };
+  }
+}
+
+export interface LoadedLlmModel {
+  id: string;
+  name: string;
+  backend?: string;
+  size_gb?: number | null;
+  size_vram_gb?: number | null;
+  family?: string;
+  parameter_size?: string;
+  quantization?: string;
+  context_length?: number;
+  expires_at?: string;
+  status?: string;
+  unloadable?: boolean;
+}
+
+export interface LoadedModelsResponse {
+  ok: boolean;
+  source?: string;
+  loaded: LoadedLlmModel[];
+  available?: LoadedLlmModel[];
+  context_length?: number;
+  selected?: string;
+  endpoint?: string;
+  reasoning_effort?: string;
+  reasoning_levels?: string[];
+}
+
+export async function getLoadedLlmModels(): Promise<LoadedModelsResponse> {
+  const r = await apiFetch("/api/models/loaded");
+  const data = await r.json().catch(() => ({}));
+  return {
+    ok: !!data?.ok,
+    source: data?.source,
+    loaded: Array.isArray(data?.loaded) ? data.loaded : [],
+    available: Array.isArray(data?.available) ? data.available : [],
+    context_length: data?.context_length,
+    selected: data?.selected,
+    endpoint: data?.endpoint,
+    reasoning_effort: data?.reasoning_effort,
+    reasoning_levels: Array.isArray(data?.reasoning_levels) ? data.reasoning_levels : undefined,
+  };
+}
+
+export async function unloadLlmModel(model: string): Promise<{
+  ok: boolean;
+  unloaded?: string;
+  backend?: string;
+  error?: string;
+}> {
+  try {
+    const r = await apiFetch("/api/models/unload", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok && data?.ok !== true) {
+      return { ok: false, error: data?.error || `Unload failed (${r.status})` };
+    }
+    return data;
+  } catch (e: any) {
+    return { ok: false, error: e?.message || "Network error unloading model" };
+  }
+}
+
+export async function loadLlmModel(model: string): Promise<{
+  ok: boolean;
+  loaded?: string;
+  backend?: string;
+  error?: string;
+}> {
+  try {
+    const r = await apiFetch("/api/models/load", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok && data?.ok !== true) {
+      return { ok: false, error: data?.error || `Load failed (${r.status})` };
+    }
+    return data;
+  } catch (e: any) {
+    return { ok: false, error: e?.message || "Network error loading model" };
+  }
+}
+
+export async function setReasoningEffort(effort: string): Promise<{
+  ok: boolean;
+  reasoning_effort?: string;
+  persisted?: boolean;
+  error?: string;
+}> {
+  try {
+    const r = await apiFetch("/api/models/reasoning", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ effort }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok && data?.ok !== true) {
+      return { ok: false, error: data?.error || `Reasoning update failed (${r.status})` };
+    }
+    return data;
+  } catch (e: any) {
+    return { ok: false, error: e?.message || "Network error setting reasoning" };
+  }
+}
+
+export async function pullLlmModel(model: string): Promise<{
+  ok: boolean;
+  pulled?: string;
+  error?: string;
+}> {
+  try {
+    const r = await apiFetch("/api/models/pull", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok && data?.ok !== true) {
+      return { ok: false, error: data?.error || `Pull failed (${r.status})` };
+    }
+    return data;
+  } catch (e: any) {
+    return { ok: false, error: e?.message || "Network error pulling model" };
   }
 }
 

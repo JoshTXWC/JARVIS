@@ -1,20 +1,35 @@
 /**
- * CHAT PANEL — holographic dialogue tiles.
- *
- * Every message renders as an icon + title row (no card background),
- * and modern sci-fi chrome (max rounded-lg).
+ * Chat window — llama.cpp-style transcript:
+ * reasoning + tool rails, per-message stats, copy/edit/regen/delete.
  */
-import { useCallback, useEffect, useRef, type ReactNode } from "react";
-import { useStore, type ChatAttachment, type ChatEntry } from "../../lib/store";
-import SafeMarkdown from "./SafeMarkdown";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Check,
+  Clock,
+  Copy,
+  Hash,
+  Pencil,
+  RefreshCw,
+  Timer,
+  Trash2,
+  X,
+} from "lucide-react";
+import { useStore, type ChatAttachment, type ChatEntry, type ToolCall } from "../../lib/store";
+import { wsClient } from "../../lib/ws";
+import {
+  ThinkingState,
+  Markdown,
+  type TraceNode,
+} from "@/components/ui/ai-thinking-and-tool-calls";
+import { cn } from "@/lib/utils";
 
 export default function ChatPanel({ embedded = false }: { embedded?: boolean }) {
   const chat = useStore((s) => s.chat);
-  const scrollRef  = useRef<HTMLDivElement>(null);
+  const tools = useStore((s) => s.tools);
+  const orbState = useStore((s) => s.orbState);
+  const scrollRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
-  const bottomRef  = useRef<HTMLDivElement>(null);
-  // Sticky autoscroll: stays pinned to the bottom unless the user scrolls
-  // up. Re-engages when they scroll back within 40 px of the bottom.
+  const bottomRef = useRef<HTMLDivElement>(null);
   const autoScroll = useRef(true);
 
   const scrollToBottom = useCallback((smooth = false) => {
@@ -24,13 +39,14 @@ export default function ChatPanel({ embedded = false }: { embedded?: boolean }) 
   }, []);
 
   const handleScroll = useCallback(() => {
-    const el = scrollRef.current; if (!el) return;
-    autoScroll.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    const el = scrollRef.current;
+    if (!el) return;
+    autoScroll.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
   }, []);
 
   useEffect(() => {
     if (autoScroll.current) scrollToBottom();
-  }, [chat, scrollToBottom]);
+  }, [chat, tools, orbState, scrollToBottom]);
 
   useEffect(() => {
     const content = contentRef.current;
@@ -42,62 +58,241 @@ export default function ChatPanel({ embedded = false }: { embedded?: boolean }) 
     return () => ro.disconnect();
   }, [scrollToBottom]);
 
+  const spoken = chat.filter(
+    (m) => (m.role === "user" || m.role === "assistant") && !isSystemNoise(m.text),
+  );
+
+  const turns = useMemo(() => buildTurns(spoken, tools, orbState), [spoken, tools, orbState]);
+
   return (
-    <div className={`${embedded ? "bg-transparent" : "holo-panel"} flex flex-col h-full overflow-hidden`}>
-      <Header />
-      <div
-        ref={scrollRef}
-        onScroll={handleScroll}
-        className="flex-1 min-h-0 overflow-y-auto px-4 py-4 text-[13px] leading-[1.55] text-jarvis-ice/90"
-        style={{
-          backgroundImage:
-            "linear-gradient(180deg, rgba(125,211,252,0.025) 0%, rgba(3,7,15,0) 30%)",
-        }}
-      >
-        {(() => {
-          // Spoken dialogue only — hide system/info/error and boot greetings.
-          const spoken = chat.filter(
-            (m) =>
-              (m.role === "user" || m.role === "assistant") &&
-              !isSystemNoise(m.text),
-          );
-          if (spoken.length === 0) return <EmptyState />;
-          return (
-            <div ref={contentRef} className="flex flex-col gap-3.5">
-              {spoken.map((m) => (
-                <MessageTile key={m.id} entry={m} />
-              ))}
-              <div ref={bottomRef} />
-            </div>
-          );
-        })()}
+    <div className={cn("flex flex-col h-full overflow-hidden bg-transparent", embedded && "min-h-0")}>
+      <div ref={scrollRef} onScroll={handleScroll} className="flex-1 min-h-0 overflow-y-auto">
+        {spoken.length === 0 && turns.every((t) => t.kind !== "tools") ? (
+          <EmptyState />
+        ) : (
+          <div
+            ref={contentRef}
+            className="mx-auto w-full max-w-2xl px-4 pt-4 pb-6 flex flex-col gap-6 selection:bg-primary/20 antialiased [font-synthesis:none]"
+          >
+            {turns.map((turn) => {
+              if (turn.kind === "user") {
+                return <UserBubble key={turn.entry.id} entry={turn.entry} />;
+              }
+              if (turn.kind === "tools") {
+                return (
+                  <ThinkingState
+                    key={turn.key}
+                    nodes={turn.nodes}
+                    autoPlay={false}
+                  />
+                );
+              }
+              return <AssistantBubble key={turn.entry.id} entry={turn.entry} />;
+            })}
+            <div ref={bottomRef} />
+          </div>
+        )}
       </div>
     </div>
   );
 }
 
-function Header() {
-  const health = useStore((s) => s.health);
-  const model = health?.model?.model;
-  return (
-    <div className="relative flex items-center justify-between px-4 py-2.5 shrink-0">
-      <div className="flex items-center gap-2.5 min-w-0">
-        <div className="w-1.5 h-1.5 bg-jarvis-aqua rounded-full animate-pulse_glow shrink-0" />
-        <span className="text-display text-[11px] tracking-[0.35em] text-shimmer font-semibold">DIALOGUE</span>
-        {model && (
-          <span
-            className="text-mono text-[9px] text-jarvis-cyan/55 tracking-wide truncate max-w-[160px] px-1.5 py-0.5 rounded-lg"
-            style={{ boxShadow: "inset 0 0 0 1px rgba(125,211,252,0.18)" }}
-            title={model}
-          >
-            {model}
-          </span>
-        )}
-      </div>
-      <div className="text-mono text-[10px] text-jarvis-ice/35 shrink-0">/help</div>
-      <div className="absolute bottom-0 left-3 right-3 glass-divider" />
-    </div>
+type Turn =
+  | { kind: "user"; entry: ChatEntry }
+  | { kind: "assistant"; entry: ChatEntry }
+  | { kind: "tools"; key: string; nodes: TraceNode[]; live: boolean };
+
+function buildTurns(spoken: ChatEntry[], tools: ToolCall[], orbState: string): Turn[] {
+  const turns: Turn[] = [];
+  const usedToolIds = new Set<string>();
+
+  for (let i = 0; i < spoken.length; i++) {
+    const entry = spoken[i];
+    if (entry.role === "user") {
+      turns.push({ kind: "user", entry });
+      continue;
+    }
+
+    const prevUserTs = (() => {
+      for (let j = i - 1; j >= 0; j--) {
+        if (spoken[j].role === "user") return spoken[j].ts;
+      }
+      return 0;
+    })();
+    const nextTs = spoken[i + 1]?.ts ?? Number.POSITIVE_INFINITY;
+    const related = tools.filter(
+      (t) => !usedToolIds.has(t.id) && t.ts >= prevUserTs && t.ts <= Math.max(entry.ts + 30_000, nextTs),
+    );
+    related.forEach((t) => usedToolIds.add(t.id));
+
+    const nodes: TraceNode[] = [];
+    if (entry.reasoning?.trim()) {
+      nodes.push({
+        type: "reasoning",
+        sentences: splitReasoning(entry.reasoning),
+        durationSeconds: entry.usage?.duration_ms
+          ? Math.max(0.1, entry.usage.duration_ms / 1000)
+          : undefined,
+        status: entry.streaming ? "running" : "completed",
+      });
+    }
+    nodes.push(...related.map(toolToNode));
+
+    if (nodes.length > 0) {
+      turns.push({
+        kind: "tools",
+        key: `tools-${entry.id}`,
+        nodes,
+        live: related.some((t) => t.status === "running" || t.status === "proposed") || !!entry.streaming,
+      });
+    } else if (entry.streaming && (orbState === "thinking" || orbState === "executing")) {
+      turns.push({
+        kind: "tools",
+        key: `thinking-${entry.id}`,
+        nodes: [
+          {
+            type: "reasoning",
+            sentences: ["Working through the request…"],
+            durationSeconds: 0,
+            status: "running",
+          },
+        ],
+        live: true,
+      });
+    }
+
+    turns.push({ kind: "assistant", entry });
+  }
+
+  const leftover = tools.filter((t) => !usedToolIds.has(t.id));
+  const liveLeftover = leftover.filter(
+    (t) => t.status === "running" || t.status === "proposed" || Date.now() - t.ts < 60_000,
   );
+  if (liveLeftover.length > 0) {
+    const lastUser = [...spoken].reverse().find((m) => m.role === "user");
+    const afterUser = lastUser
+      ? liveLeftover.filter((t) => t.ts >= lastUser.ts)
+      : liveLeftover;
+    if (afterUser.length > 0) {
+      turns.push({
+        kind: "tools",
+        key: `tools-live-${afterUser.map((t) => t.id).join("-")}`,
+        nodes: afterUser.map(toolToNode),
+        live: afterUser.some((t) => t.status === "running" || t.status === "proposed"),
+      });
+    }
+  } else if (
+    (orbState === "thinking" || orbState === "executing") &&
+    spoken.length > 0 &&
+    spoken[spoken.length - 1]?.role === "user"
+  ) {
+    turns.push({
+      kind: "tools",
+      key: "thinking-live",
+      nodes: [
+        {
+          type: "reasoning",
+          sentences: ["Thinking through the next steps…"],
+          durationSeconds: 0,
+          status: "running",
+        },
+      ],
+      live: true,
+    });
+  }
+
+  return turns;
+}
+
+function splitReasoning(text: string): string[] {
+  return text
+    .split(/\n+/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .slice(0, 48);
+}
+
+function toolToNode(t: ToolCall): TraceNode {
+  const name = (t.tool || "tool").toLowerCase();
+  const isShell = /shell|exec|command|powershell|bash|cmd|run_shell/.test(name);
+  const isSearch = /search|web_search|browse|fetch/.test(name);
+  const isRead = /read|file_read|get_file/.test(name);
+  const isWrite = /write|edit|patch|apply_patch|file_write/.test(name);
+  const failed = t.status === "fail" || t.status === "denied";
+  const status =
+    t.status === "ok"
+      ? "completed"
+      : failed
+        ? "failed"
+        : t.status === "running" || t.status === "proposed"
+          ? "running"
+          : "completed";
+
+  if (isShell) {
+    const cmd =
+      (typeof t.args?.command === "string" && t.args.command) ||
+      (typeof t.args?.cmd === "string" && t.args.cmd) ||
+      t.preview ||
+      t.tool;
+    return {
+      id: t.id,
+      type: "terminal",
+      toolName: t.tool,
+      command: String(cmd),
+      output: t.result,
+      exitCode: failed ? 1 : 0,
+      durationMs: t.duration_s != null ? Math.round(t.duration_s * 1000) : undefined,
+      status,
+    };
+  }
+
+  if (isSearch) {
+    return {
+      id: t.id,
+      type: "search",
+      toolName: t.tool,
+      secondary: t.preview || singleArg(t.args) || t.tool,
+      details: t.result
+        ? t.result.split("\n").slice(0, 24).map((text) => ({ text, tone: "muted" as const }))
+        : undefined,
+      status,
+    };
+  }
+
+  return {
+    id: t.id,
+    type: "tool",
+    toolName: isRead ? "read_file" : isWrite ? "edit_file" : t.tool,
+    primary: prettyToolLabel(t.tool),
+    secondary: t.preview || singleArg(t.args),
+    args: t.args,
+    details: t.result
+      ? t.result.split("\n").slice(0, 24).map((text) => ({
+          text,
+          tone: failed ? ("error" as const) : ("muted" as const),
+        }))
+      : undefined,
+    status,
+    durationSeconds: t.duration_s,
+  };
+}
+
+function singleArg(args: Record<string, unknown> | undefined): string | undefined {
+  if (!args) return undefined;
+  const path = args.path ?? args.file ?? args.query ?? args.url ?? args.pattern;
+  if (typeof path === "string" && path.trim()) return path;
+  try {
+    const s = JSON.stringify(args);
+    return s === "{}" ? undefined : s.length > 120 ? `${s.slice(0, 117)}…` : s;
+  } catch {
+    return undefined;
+  }
+}
+
+function prettyToolLabel(tool: string): string {
+  return (tool || "Tool")
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 function isSystemNoise(text: string): boolean {
@@ -107,117 +302,7 @@ function isSystemNoise(text: string): boolean {
   return false;
 }
 
-function EmptyState() {
-  return (
-    <div className="flex flex-col gap-3.5 mt-1">
-      <div className="chat-tile">
-        <div className="chat-tile-icon" aria-hidden>
-          <PromptIcon />
-        </div>
-        <div className="chat-tile-body">
-          <div className="chat-tile-title mb-2">Awaiting input</div>
-          <p className="text-[12px] text-jarvis-ice/50 mb-3 leading-relaxed">
-            Speak or type a command to begin.
-          </p>
-          <div className="space-y-1.5">
-            {[
-              "what is the system status?",
-              "scan this folder: C:\\Users\\Me\\projects\\foo",
-              "search memory for python",
-              "write a hello-world script and run it",
-            ].map((s) => (
-              <div key={s} className="flex items-center gap-2 group cursor-default">
-                <span className="text-jarvis-cyan/45 group-hover:text-jarvis-cyan transition-colors text-mono text-[11px]">›</span>
-                <span className="text-mono text-[11px] text-jarvis-ice/45 group-hover:text-jarvis-ice/75 transition-colors">
-                  {s}
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function MessageTile({ entry }: { entry: ChatEntry }) {
-  const { role, text, streaming, attachments, ts } = entry;
-  const time = formatTime(ts);
-
-  if (role !== "user" && role !== "assistant") return null;
-
-  if (role === "user") {
-    return (
-      <Tile
-        icon={<UserIcon />}
-        title="You"
-        time={time}
-        variant="user"
-      >
-        {attachments && attachments.length > 0 && <AttachmentRow atts={attachments} />}
-        {text && (
-          <p className="text-jarvis-ice whitespace-pre-wrap break-words">{text}</p>
-        )}
-      </Tile>
-    );
-  }
-
-  // assistant
-  return (
-    <Tile
-      icon={<DeltaIcon />}
-      title="Jarvis"
-      time={time}
-    >
-      <div className="text-jarvis-ice/95 whitespace-pre-wrap break-words">
-        <SafeMarkdown text={text} />
-        {streaming && (
-          <span className="inline-block w-[7px] h-[13px] bg-jarvis-aqua/80 ml-0.5 align-middle animate-pulse" />
-        )}
-      </div>
-    </Tile>
-  );
-}
-
-function Tile({
-  icon,
-  title,
-  time,
-  children,
-  variant,
-}: {
-  icon: ReactNode;
-  title: string;
-  time?: string;
-  children: ReactNode;
-  variant?: "user" | "error";
-}) {
-  const variantClass =
-    variant === "user" ? "chat-tile-user" :
-    variant === "error" ? "chat-tile-error" :
-    "";
-
-  return (
-    <div className={`chat-tile animate-boot_in ${variantClass}`}>
-      <div className="chat-tile-icon" aria-hidden>
-        {icon}
-      </div>
-      <div className="chat-tile-body">
-        <div className="flex items-center justify-between gap-3 mb-1.5">
-          <div className="chat-tile-title">{title}</div>
-          {time && (
-            <div className="text-mono text-[9px] tracking-wider text-jarvis-ice/35 shrink-0 tabular-nums">
-              {time}
-            </div>
-          )}
-        </div>
-        {children}
-      </div>
-    </div>
-  );
-}
-
-function formatTime(ts: number): string {
+function formatTs(ts: number): string {
   try {
     return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   } catch {
@@ -225,85 +310,260 @@ function formatTime(ts: number): string {
   }
 }
 
+function formatDuration(ms?: number): string {
+  if (ms == null || ms <= 0) return "";
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  return `${(ms / 1000).toFixed(ms >= 10_000 ? 1 : 2)}s`;
+}
+
+function MessageStats({ entry }: { entry: ChatEntry }) {
+  const u = entry.usage;
+  const tokenTotal =
+    u?.prompt_tokens != null || u?.completion_tokens != null
+      ? (u.prompt_tokens ?? 0) + (u.completion_tokens ?? 0)
+      : u?.total_tokens;
+  const tokenDetail =
+    u?.prompt_tokens != null || u?.completion_tokens != null
+      ? `${u.prompt_tokens ?? 0}↑ ${u.completion_tokens ?? 0}↓`
+      : null;
+  const duration = formatDuration(u?.duration_ms);
+  const time = formatTs(entry.ts);
+  if (!entry.model && !time && tokenTotal == null && !duration) return null;
+
+  return (
+    <div className="mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[11px] text-muted-foreground/80 tabular-nums">
+      {entry.model && <span className="truncate max-w-[140px]">{entry.model}</span>}
+      {time && (
+        <span className="inline-flex items-center gap-1">
+          <Clock className="size-3 opacity-70" aria-hidden />
+          {time}
+        </span>
+      )}
+      {tokenTotal != null && tokenTotal > 0 && (
+        <span className="inline-flex items-center gap-1" title={tokenDetail || undefined}>
+          <Hash className="size-3 opacity-70" aria-hidden />
+          {tokenTotal.toLocaleString()}
+          {tokenDetail && <span className="opacity-60">({tokenDetail})</span>}
+        </span>
+      )}
+      {duration && (
+        <span className="inline-flex items-center gap-1">
+          <Timer className="size-3 opacity-70" aria-hidden />
+          {duration}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function MessageActions({
+  entry,
+  align = "left",
+  onEdit,
+}: {
+  entry: ChatEntry;
+  align?: "left" | "right";
+  onEdit?: () => void;
+}) {
+  const dropChat = useStore((s) => s.dropChat);
+  const truncateChatFrom = useStore((s) => s.truncateChatFrom);
+  const [copied, setCopied] = useState(false);
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(entry.text || "");
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const regenerate = () => {
+    if (entry.role === "assistant") {
+      // Find preceding user message and resend it after truncating this reply onward.
+      const chat = useStore.getState().chat;
+      const idx = chat.findIndex((c) => c.id === entry.id);
+      let userText = "";
+      for (let i = idx - 1; i >= 0; i--) {
+        if (chat[i].role === "user") {
+          userText = chat[i].text;
+          break;
+        }
+      }
+      truncateChatFrom(entry.id);
+      if (userText.trim()) wsClient.chat(userText);
+      return;
+    }
+    // User message: truncate from next message and resend.
+    const chat = useStore.getState().chat;
+    const idx = chat.findIndex((c) => c.id === entry.id);
+    const next = chat[idx + 1];
+    if (next) truncateChatFrom(next.id);
+    else {
+      // No assistant yet — just resend
+    }
+    dropChat(entry.id);
+    if (entry.text.trim()) wsClient.chat(entry.text);
+  };
+
+  const remove = () => {
+    dropChat(entry.id);
+  };
+
+  return (
+    <div
+      className={cn(
+        "mt-1 flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100",
+        align === "right" && "justify-end",
+      )}
+    >
+      <ActionBtn label={copied ? "Copied" : "Copy"} onClick={() => void copy()}>
+        {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+      </ActionBtn>
+      {onEdit && (
+        <ActionBtn label="Edit" onClick={onEdit}>
+          <Pencil className="size-3.5" />
+        </ActionBtn>
+      )}
+      <ActionBtn label="Regenerate" onClick={regenerate}>
+        <RefreshCw className="size-3.5" />
+      </ActionBtn>
+      <ActionBtn label="Delete" onClick={remove}>
+        <Trash2 className="size-3.5" />
+      </ActionBtn>
+    </div>
+  );
+}
+
+function ActionBtn({
+  children,
+  label,
+  onClick,
+}: {
+  children: React.ReactNode;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      title={label}
+      aria-label={label}
+      onClick={onClick}
+      className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-white/[0.06] hover:text-foreground outline-none"
+    >
+      {children}
+    </button>
+  );
+}
+
+function EmptyState() {
+  return (
+    <div className="h-full flex flex-col items-center justify-center px-6 text-center">
+      <p className="text-base font-semibold text-foreground">Start a conversation</p>
+      <p className="mt-1 text-sm text-muted-foreground max-w-xs">
+        Use the prompt below the orb. Replies show up here with tokens, timing, and tools.
+      </p>
+    </div>
+  );
+}
+
+function UserBubble({ entry }: { entry: ChatEntry }) {
+  const { text, attachments } = entry;
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(text);
+  const truncateChatFrom = useStore((s) => s.truncateChatFrom);
+
+  const beginSave = () => {
+    const next = draft.trim();
+    if (!next) return;
+    // Branch like llama.cpp: truncate from this message onward, then resend.
+    truncateChatFrom(entry.id);
+    setEditing(false);
+    wsClient.chat(next);
+  };
+
+  return (
+    <div className="group flex flex-col items-end">
+      <div className="max-w-[80%] rounded-2xl bg-muted px-4 py-2.5 text-[14px] leading-relaxed text-foreground text-balance shadow-xs">
+        {attachments && attachments.length > 0 && <AttachmentRow atts={attachments} />}
+        {editing ? (
+          <div className="flex flex-col gap-2 min-w-[220px]">
+            <textarea
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              className="w-full min-h-[72px] resize-y rounded-lg bg-background/60 px-2 py-1.5 text-sm outline-none"
+              autoFocus
+            />
+            <div className="flex justify-end gap-1">
+              <button
+                type="button"
+                onClick={() => {
+                  setDraft(text);
+                  setEditing(false);
+                }}
+                className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-white/[0.06]"
+                aria-label="Cancel edit"
+              >
+                <X className="size-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={beginSave}
+                className="inline-flex size-7 items-center justify-center rounded-md text-primary hover:bg-primary/10"
+                aria-label="Save edit"
+              >
+                <Check className="size-3.5" />
+              </button>
+            </div>
+          </div>
+        ) : (
+          text && <p className="whitespace-pre-wrap break-words">{text}</p>
+        )}
+      </div>
+      {!editing && (
+        <>
+          <MessageStats entry={entry} />
+          <MessageActions entry={entry} align="right" onEdit={() => setEditing(true)} />
+        </>
+      )}
+    </div>
+  );
+}
+
+function AssistantBubble({ entry }: { entry: ChatEntry }) {
+  const { text, streaming } = entry;
+  return (
+    <div className="group flex flex-col gap-1 min-w-0">
+      <div className="font-sans text-[14px] leading-[22px] text-foreground/90 select-text text-pretty">
+        <Markdown text={text || ""} />
+        {streaming && (
+          <span className="inline-block w-1.5 h-4 bg-foreground/70 ml-0.5 align-middle animate-pulse rounded-sm" />
+        )}
+      </div>
+      {!streaming && (
+        <>
+          <MessageStats entry={entry} />
+          <MessageActions entry={entry} align="left" />
+        </>
+      )}
+    </div>
+  );
+}
+
 function AttachmentRow({ atts }: { atts: ChatAttachment[] }) {
   return (
-    <div className="flex flex-wrap gap-2 mb-2.5">
+    <div className="flex flex-wrap gap-2 mb-2">
       {atts.map((a, i) => (
-        <div
-          key={i}
-          className="flex items-center gap-2 px-1.5 py-1 rounded-lg border border-jarvis-aqua/30 bg-jarvis-aqua/5 text-[10px] text-mono text-jarvis-aqua"
-        >
+        <div key={i} className="overflow-hidden rounded-xl border border-border/60">
           {a.type === "image" && (a.data_url || a.url) ? (
-            <img
-              src={a.data_url || a.url}
-              alt=""
-              className="w-14 h-14 object-cover rounded-lg border border-jarvis-aqua/30"
-            />
+            <img src={a.data_url || a.url} alt="" className="w-16 h-16 object-cover" />
           ) : (
-            <span className="px-1.5 py-1 rounded-md border border-jarvis-aqua/40">FILE</span>
+            <span className="block px-3 py-2 text-xs truncate max-w-[140px]">{a.name}</span>
           )}
-          <span className="truncate max-w-[160px] pr-1">{a.name}</span>
         </div>
       ))}
     </div>
   );
 }
-
-/* ── Icons ─────────────────────────────────────────────────────────────── */
-
-function CubeIcon() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" aria-hidden>
-      <path d="M12 2.5 20.5 7v10L12 21.5 3.5 17V7L12 2.5Z" />
-      <path d="M12 12v9.5M12 12 3.5 7M12 12l8.5-5" />
-    </svg>
-  );
-}
-
-function DeltaIcon() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden>
-      <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="1.4" opacity="0.55" />
-      <path d="M12 7.2 17.2 16.5H6.8L12 7.2Z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" fill="rgba(125,211,252,0.12)" />
-    </svg>
-  );
-}
-
-function UserIcon() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <circle cx="12" cy="8.5" r="3.2" />
-      <path d="M5.5 19.2c1.6-3.2 4-4.8 6.5-4.8s4.9 1.6 6.5 4.8" />
-    </svg>
-  );
-}
-
-function InfoIcon() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" aria-hidden>
-      <circle cx="12" cy="12" r="8.5" />
-      <path d="M12 11v5.5" />
-      <circle cx="12" cy="8" r="0.9" fill="currentColor" stroke="none" />
-    </svg>
-  );
-}
-
-function AlertIcon() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" strokeLinecap="round" aria-hidden>
-      <path d="M12 3.8 21 19.5H3L12 3.8Z" />
-      <path d="M12 10v4.2" />
-      <circle cx="12" cy="16.6" r="0.85" fill="currentColor" stroke="none" />
-    </svg>
-  );
-}
-
-function PromptIcon() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <rect x="3.5" y="5" width="17" height="14" rx="2" />
-      <path d="M8 12h3.5l2 2.2L16.5 9" />
-    </svg>
-  );
-}
-

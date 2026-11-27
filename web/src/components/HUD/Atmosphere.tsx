@@ -18,7 +18,7 @@ export default function Atmosphere() {
       {/* Soft edge falloff — frames the scene */}
       <div className="absolute inset-0" style={{
         background:
-          "radial-gradient(ellipse 90% 100% at 50% 50%, transparent 50%, rgba(2,5,12,0.55) 100%)",
+          "radial-gradient(ellipse 90% 100% at 50% 50%, transparent 55%, rgba(8,13,20,0.6) 100%)",
       }} />
 
     </div>
