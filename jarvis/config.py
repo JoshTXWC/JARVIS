@@ -189,6 +189,9 @@ class VoiceConfig(BaseModel):
     edge_voice: str = "en-GB-ThomasNeural"
     edge_rate: str = "-6%"
     edge_pitch: str = "+0Hz"
+    # When provider=piper but Piper isn't installed / the voice file is
+    # missing, speak with the Edge British voice instead of staying silent.
+    edge_fallback: bool = True
     # Piper (community JARVIS model, closest to Paul Bettany)
     piper_enabled: bool = False
     piper_model: str = "data/voices/jarvis.onnx"

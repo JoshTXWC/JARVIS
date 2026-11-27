@@ -1852,8 +1852,18 @@ async def tts(request: Request, body: TTSBody):
     text = text[:1800]
     tts_log = logging.getLogger("jarvis.tts")
 
-    # JARVIS voice only — Piper community model. No Edge/Riva fallback so the
-    # spoken voice never switches to a different persona mid-session.
+    # JARVIS voice — Piper community model. If Piper is *installed and loaded*
+    # but a synthesis fails we return 503 rather than switching voices
+    # mid-session. If Piper isn't set up at all (package or voice file
+    # missing — e.g. fresh install), fall back to the British Edge voice so
+    # JARVIS isn't silent.
+    if _should_try_piper(cfg) and not _piper_available(cfg) and _edge_tts_available() \
+            and getattr(cfg.voice, "edge_fallback", True):
+        try:
+            audio = await _synthesize_with_edge(text, cfg)
+            return Response(audio, media_type="audio/mpeg", headers={"X-JARVIS-TTS": "edge"})
+        except Exception as e:  # noqa: BLE001
+            tts_log.warning("Edge TTS fallback failed (%s)", e)
     if _should_try_piper(cfg):
         try:
             audio = _synthesize_with_piper(text, cfg)
@@ -1864,6 +1874,13 @@ async def tts(request: Request, body: TTSBody):
                 {"ok": False, "error": f"JARVIS voice unavailable: {e}"},
                 status_code=503,
             )
+
+    if _edge_tts_available():
+        try:
+            audio = await _synthesize_with_edge(text, cfg)
+            return Response(audio, media_type="audio/mpeg", headers={"X-JARVIS-TTS": "edge"})
+        except Exception as e:  # noqa: BLE001
+            tts_log.warning("Edge TTS failed (%s)", e)
 
     return JSONResponse(
         {
@@ -1920,6 +1937,26 @@ def _synthesize_with_piper(text: str, cfg) -> bytes:
     with wave.open(buf, "wb") as wf:
         _piper_voice.synthesize_wav(text, wf, syn_config=syn_cfg)
     return buf.getvalue()
+
+
+async def _synthesize_with_edge(text: str, cfg) -> bytes:
+    """Microsoft Edge neural TTS (online). Returns MP3 bytes."""
+    import edge_tts  # type: ignore
+
+    comm = edge_tts.Communicate(
+        text,
+        cfg.voice.edge_voice or "en-GB-RyanNeural",
+        rate=cfg.voice.edge_rate or "+0%",
+        pitch=cfg.voice.edge_pitch or "+0Hz",
+    )
+    out = io.BytesIO()
+    async for chunk in comm.stream():
+        if chunk.get("type") == "audio":
+            out.write(chunk["data"])
+    data = out.getvalue()
+    if not data:
+        raise RuntimeError("edge-tts returned no audio")
+    return data
 
 
 def _edge_tts_available() -> bool:

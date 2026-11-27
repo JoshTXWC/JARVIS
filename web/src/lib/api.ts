@@ -375,3 +375,109 @@ export async function img2img(
   const r = await apiFetch("/api/img2img", { method: "POST", body: form });
   return r.json();
 }
+
+// ── Local model manager (Ollama) ────────────────────────────────────────
+
+export interface OllamaStatus {
+  ok: boolean;
+  base: string;
+  running: boolean;
+  version?: string | null;
+  installed: boolean;
+  download_url: string;
+  active_model: string;
+  active_endpoint: string;
+}
+
+export interface OllamaInstalledModel {
+  name: string;
+  size_gb?: number | null;
+  modified_at?: string;
+  family?: string;
+  parameter_size?: string;
+  quantization?: string;
+  running?: boolean;
+  active?: boolean;
+}
+
+export interface OllamaLibraryModel {
+  id: string;
+  label: string;
+  size_gb?: number | null;
+  tags: string[];
+  summary: string;
+  recommended?: boolean;
+  fit?: string;
+  installed?: boolean;
+}
+
+export interface OllamaPullJob {
+  name: string;
+  status: "queued" | "pulling" | "success" | "error" | "cancelled" | string;
+  detail: string;
+  completed: number;
+  total: number;
+  percent: number | null;
+  error: string;
+}
+
+async function jsonOrError<T>(r: Response): Promise<T & { ok: boolean; error?: string }> {
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok && data?.ok !== true) {
+    return { ...(data || {}), ok: false, error: data?.error || `Request failed (${r.status})` };
+  }
+  return data;
+}
+
+async function postModel(path: string, model: string) {
+  try {
+    const r = await apiFetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model }),
+    });
+    return jsonOrError<Record<string, unknown>>(r);
+  } catch (e: any) {
+    return { ok: false, error: e?.message || "Network error" };
+  }
+}
+
+export async function getOllamaStatus(): Promise<OllamaStatus> {
+  return jsonOrError<OllamaStatus>(await apiFetch("/api/ollama/status"));
+}
+
+export async function startOllama() {
+  try {
+    return jsonOrError<{ status: string }>(await apiFetch("/api/ollama/start", { method: "POST" }));
+  } catch (e: any) {
+    return { ok: false, status: "", error: e?.message || "Network error" };
+  }
+}
+
+export async function getOllamaModels(): Promise<{
+  ok: boolean;
+  error?: string;
+  installed: OllamaInstalledModel[];
+  active_model?: string;
+}> {
+  const d = await jsonOrError<{ installed: OllamaInstalledModel[]; active_model?: string }>(
+    await apiFetch("/api/ollama/models"),
+  );
+  return { ...d, installed: Array.isArray(d.installed) ? d.installed : [] };
+}
+
+export async function getOllamaLibrary(): Promise<{ ok: boolean; models: OllamaLibraryModel[]; browse_url?: string }> {
+  const d = await jsonOrError<{ models: OllamaLibraryModel[]; browse_url?: string }>(
+    await apiFetch("/api/ollama/library"),
+  );
+  return { ...d, models: Array.isArray(d.models) ? d.models : [] };
+}
+
+export async function getOllamaPulls(): Promise<OllamaPullJob[]> {
+  const d = await jsonOrError<{ jobs: OllamaPullJob[] }>(await apiFetch("/api/ollama/pulls"));
+  return Array.isArray(d.jobs) ? d.jobs : [];
+}
+
+export const pullOllamaModel = (model: string) => postModel("/api/ollama/pull", model);
+export const cancelOllamaPull = (model: string) => postModel("/api/ollama/pull/cancel", model);
+export const deleteOllamaModel = (model: string) => postModel("/api/ollama/delete", model);

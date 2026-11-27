@@ -31,7 +31,7 @@ from ..config import Config
 from ..core.memory import Memory
 from ..core.orchestrator import Orchestrator
 from ..plugins.registry import PluginRegistry
-from . import routes, ws
+from . import ollama_routes, routes, ws
 
 log = logging.getLogger("jarvis.server")
 
@@ -113,8 +113,21 @@ def create_app(
 
         preload_task = asyncio.create_task(_preload())
 
+        # Local LLM runtime: start `ollama serve` if the endpoint is a local
+        # Ollama that isn't up (Windows users often close the tray app).
+        async def _ensure_ollama() -> None:
+            try:
+                from ..core.ollama import ensure_running
+                status = await ensure_running(cfg)
+                log.info("ollama: %s", status)
+            except Exception as e:  # noqa: BLE001
+                log.warning("ollama check failed: %s", e)
+
+        ollama_task = asyncio.create_task(_ensure_ollama())
+
         yield
 
+        ollama_task.cancel()
         preload_task.cancel()
         try:
             await preload_task
@@ -156,6 +169,7 @@ def create_app(
         return await call_next(request)
 
     app.include_router(routes.router, prefix="/api")
+    app.include_router(ollama_routes.router, prefix="/api")
     app.add_api_websocket_route("/ws", ws.websocket_endpoint)
 
     if web_dist and web_dist.exists():
