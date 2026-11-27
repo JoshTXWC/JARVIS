@@ -36,6 +36,8 @@ KEYWORD_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (r"\b(file|files|folder|folders|directory|dir|desktop|documents|downloads|path)\b",
      ("list_dir", "read_file", "write_file", "search_files", "mkdir", "stat", "copy", "move", "edit_file")),
     (r"\b(delete|remove|erase)\b", ("delete",)),
+    (r"\b(change|edit|modify|update|fix|replace|rename|refactor|add|implement)\b",
+     ("read_code", "edit_file", "code_search")),
     (r"\b(github|gh|pull request|pr|prs|issue|issues|clone|commit|push|branch)\b",
      ("github_status", "github_list_repos", "github_get_repo", "github_read_file", "github_list_issues",
       "github_list_pulls", "github_clone", "github_create_pull_request", "git_commit_push", "git_status")),
@@ -117,6 +119,9 @@ def select_tools(
     text = (user_text or "").lower()
     # 1) tools already in play this turn keep their slot
     add(recent_tools)
+    # 1b) a file path in the request → reading/editing tools
+    if re.search(r"[\w\-]+\.[a-z0-9]{1,8}\b", text) and re.search(r"[/\\]|\.(py|ts|tsx|js|json|ya?ml|md|txt|toml|bat|ps1|cs|java|go|rs|cpp|c|h)\b", text):
+        add(("read_code", "edit_file", "read_file"))
     # 2) explicit tool name mentioned
     add(n for n in avail if n in text)
     # 3) keyword groups
@@ -138,9 +143,12 @@ def select_tools(
                 scored.append((score, n))
         scored.sort(key=lambda x: (-x[0], x[1]))
         add(n for _, n in scored[:4])
-    # 5) core set fills the rest (and is the whole set for chit-chat)
+    # 5) an active agent's own tools (in its priority order) come next
+    if allow:
+        add([n for n in (allowlist or []) if n not in CORE_TOOLS][:6])
+    # 6) core set fills the rest (and is the whole set for chit-chat)
     add(CORE_TOOLS)
-    if allow and not picked:
+    if allow and len(picked) < max_tools:
         add(avail)
     return picked[: max(1, max_tools)]
 

@@ -141,6 +141,20 @@ class Orchestrator:
         return [Event(EventKind.UI, text=payload.get("action", "ui"), payload=payload)]
 
     # ------------------------------------------------------------------
+    def _maybe_switch_mode(self, user_text: str) -> str:
+        """'coding mode' / 'exit coding mode' typed or spoken as a whole message."""
+        t = re.sub(r"[^a-z ]", "", (user_text or "").lower()).strip()
+        t = re.sub(r"^(hey |ok )?jarvis ", "", t)
+        if re.fullmatch(r"(switch to |enter |enable |start |go to |use )?(coding|code|developer|dev) mode( please)?", t):
+            from ..agents.code import CodeAgent
+            self.set_agent(CodeAgent())
+            return ("Coding mode engaged, sir. Name a file or project and I will read it, explain it, "
+                    "and propose or apply edits. Say 'standard mode' to return.")
+        if re.fullmatch(r"(exit|leave|stop|disable|quit) (coding|code|dev) mode|(switch to |back to )?(standard|normal|default) mode", t):
+            self.set_agent(None)
+            return "Standard mode, sir."
+        return ""
+
     def _referenced_files_block(self, user_text: str) -> str:
         from .file_refs import referenced_files_block
         try:
@@ -675,6 +689,14 @@ class Orchestrator:
         # Capture durable self-disclosure ("my name is…", "I prefer…") into
         # long-term semantic memory. Gated + best-effort.
         await self._auto_remember(user_text)
+
+        mode_reply = self._maybe_switch_mode(user_text)
+        if mode_reply:
+            self._history.append({"role": "assistant", "content": mode_reply})
+            yield Event(EventKind.INFO, text=f"agent active: {self._active_agent.name if self._active_agent else 'jarvis'}")
+            yield Event(EventKind.ASSISTANT, text=mode_reply)
+            yield Event(EventKind.DONE)
+            return
 
         immediate = core_reply(user_text, self.cfg)
         if immediate:
