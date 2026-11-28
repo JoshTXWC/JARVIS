@@ -151,7 +151,7 @@ model:
   #   Gemini 2.5 Flash/Pro  → GEMINI_API_KEY → Google OpenAI-compatible route
   provider: openai_compatible
   endpoint: http://localhost:11434/v1
-  model: qwen2.5:1.5b
+  model: auto
   api_key_env: OLLAMA_API_KEY
   # Restored when leaving a cloud model via the switcher.
   local_endpoint: http://localhost:11434/v1
@@ -162,7 +162,7 @@ model:
   native_tool_calls: true
   # none | low | medium | high. Only reasoning models (qwen3, deepseek-r1,
   # gpt-oss…) accept this; JARVIS drops it automatically if a model refuses.
-  reasoning_effort: none
+  reasoning_effort: high
   # Prompt size: auto = lean for localhost endpoints (compact persona + only
   # the tools relevant to each request, fits Ollama's 4096-token default
   # context), full for cloud. Force with `lean` or `full`.

@@ -2,20 +2,25 @@ import { useEffect, useMemo, useState } from "react";
 import { useStore, nextId, type ChatAttachment } from "../../lib/store";
 import { wsClient } from "../../lib/ws";
 import {
+  cancelOllamaPull,
+  deleteOllamaModel,
   getHealth,
   getLlmModels,
   getLoadedLlmModels,
+  getOllamaPulls,
   getTools,
-  pullLlmModel,
+  pullOllamaModel,
   selectLlmModel,
   setReasoningEffort,
   unloadLlmModel,
   type LlmModelInfo,
   type LoadedLlmModel,
+  type OllamaPullJob,
 } from "../../lib/api";
 import { startWakeListening, stopWakeListening } from "../../lib/wakeMic";
 import {
   PromptInput,
+  type ModelPullProgress,
   type PromptModelOption,
   type PromptToolOption,
 } from "@/components/ui/ai-chat-input";
@@ -41,6 +46,7 @@ export default function CommandBar({
   const [loadedModels, setLoadedModels] = useState<LoadedLlmModel[]>([]);
   const [reasoningEffort, setReasoning] = useState("none");
   const [loadBusy, setLoadBusy] = useState<string | null>(null);
+  const [pullJobs, setPullJobs] = useState<OllamaPullJob[]>([]);
 
   const pushChat = useStore((s) => s.pushChat);
   const micEnabled = useStore((s) => s.micEnabled);
@@ -75,20 +81,47 @@ export default function CommandBar({
   const labelToId = new Map(models.map((m) => [m.label || m.id, m.id]));
   const modelOptions = useMemo<PromptModelOption[]>(
     () =>
-      models.map((m) => ({
-        id: m.id,
-        label: m.label || m.id,
-        skill: m.skill,
-        skill_label: m.skill_label,
-        tier: m.tier,
-        recommended: m.recommended,
-        cloud: m.cloud,
-        installed: m.installed,
-        summary: m.summary,
-        pull: m.pull,
-      })),
+      models
+        .filter((m) => !m.cloud)
+        .map((m) => ({
+          id: m.id,
+          label: m.label || m.id,
+          skill: m.skill,
+          skill_label: m.skill_label,
+          tier: m.tier,
+          recommended: m.recommended,
+          cloud: false,
+          installed: m.installed,
+          summary: m.summary,
+          pull: m.pull,
+          vram_gb: m.vram_gb,
+          ram_gb: m.ram_gb,
+          size_gb: m.vram_gb ?? null,
+          fit: m.fit,
+          fit_label: m.fit_label,
+          needs: m.needs,
+        })),
     [models],
   );
+
+  const pullProgress = useMemo<ModelPullProgress[]>(
+    () =>
+      pullJobs
+        .filter((j) => j.status === "pulling" || j.status === "queued" || j.status === "error")
+        .map((j) => ({
+          id: j.name,
+          percent: j.percent,
+          detail: j.detail || (j.status === "error" ? j.error : j.status),
+          status: j.status,
+        })),
+    [pullJobs],
+  );
+
+  const refreshPulls = () => {
+    getOllamaPulls()
+      .then(setPullJobs)
+      .catch(() => undefined);
+  };
 
   const refreshCatalog = () => {
     getLlmModels()
@@ -136,11 +169,31 @@ export default function CommandBar({
       })
       .catch(() => undefined);
     refreshLoaded();
+    refreshPulls();
     return () => {
       liveFetch = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [health?.model.model]);
+
+  // Poll Ollama pull progress while any download is active.
+  const pulling = pullJobs.some((j) => j.status === "pulling" || j.status === "queued");
+  useEffect(() => {
+    if (!pulling) return;
+    const id = setInterval(() => {
+      getOllamaPulls()
+        .then((jobs) => {
+          setPullJobs(jobs);
+          if (!jobs.some((j) => j.status === "pulling" || j.status === "queued")) {
+            refreshCatalog();
+            refreshLoaded();
+          }
+        })
+        .catch(() => undefined);
+    }, 900);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pulling]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -343,6 +396,7 @@ export default function CommandBar({
               if (res.reasoning_effort) setReasoning(res.reasoning_effort);
             });
           }}
+          pullProgress={pullProgress}
           onUnloadModel={(id) => {
             setLoadBusy(id);
             void unloadLlmModel(id)
@@ -357,13 +411,61 @@ export default function CommandBar({
               .finally(() => setLoadBusy(null));
           }}
           onPullModel={(id) => {
-            setLoadBusy(id);
+            const meta = models.find((m) => m.id === id);
+            const name =
+              (meta?.pull || "").replace(/^ollama pull\s+/i, "").trim() || id;
+            setLoadBusy(name);
             setModelError(null);
-            void pullLlmModel(id)
+            void pullOllamaModel(name)
               .then((res) => {
                 if (!res.ok) {
                   setModelError(res.error || "Download failed");
                   return;
+                }
+                refreshPulls();
+              })
+              .finally(() => setLoadBusy(null));
+          }}
+          onCancelPull={(id) => {
+            const meta = models.find((m) => m.id === id || m.label === id);
+            const live = pullJobs.find(
+              (j) => j.name === id || j.name === meta?.id || j.name === meta?.label,
+            );
+            const name =
+              live?.name ||
+              (meta?.pull || "").replace(/^ollama pull\s+/i, "").trim() ||
+              id;
+            setModelError(null);
+            void cancelOllamaPull(name)
+              .then((res) => {
+                if (!res.ok) setModelError(String(res.error || "Cancel failed"));
+                refreshPulls();
+              })
+              .catch(() => refreshPulls());
+          }}
+          onDeleteModel={(id) => {
+            const meta = models.find((m) => m.id === id || m.label === id);
+            const name =
+              (meta?.pull || "").replace(/^ollama pull\s+/i, "").trim() ||
+              meta?.label ||
+              id;
+            if (!window.confirm(`Delete installed model "${name}" from disk?`)) return;
+            setLoadBusy(name);
+            setModelError(null);
+            void deleteOllamaModel(name)
+              .then((res) => {
+                if (!res.ok) {
+                  setModelError(String(res.error || "Delete failed"));
+                  return;
+                }
+                if (
+                  selectedModel === id ||
+                  selectedModel === name ||
+                  selectedModel === meta?.id ||
+                  activeLabel === meta?.label
+                ) {
+                  setAutoModel(true);
+                  void selectLlmModel("auto");
                 }
                 refreshCatalog();
                 refreshLoaded();
@@ -376,7 +478,7 @@ export default function CommandBar({
         />
       </div>
 
-      {(modelError || activeMeta?.cloud || loadBusy) && (
+      {(modelError || loadBusy) && (
         <div className="shrink-0 flex items-center justify-end gap-2 pt-2 min-w-0">
           {loadBusy && (
             <span className="text-xs text-muted-foreground truncate max-w-[12rem]">
@@ -385,11 +487,6 @@ export default function CommandBar({
           )}
           {modelError && (
             <span className="text-xs text-destructive truncate max-w-[10rem]">{modelError}</span>
-          )}
-          {activeMeta?.cloud && (
-            <span className="rounded-md border border-primary/25 bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-primary">
-              cloud
-            </span>
           )}
         </div>
       )}

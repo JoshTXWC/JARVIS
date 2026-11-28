@@ -49,11 +49,22 @@ export default function Orb({
           : "relative";
 
   return (
-    <div className={cn(positionClass, sizeClass, className)} aria-hidden>
+    <div
+      className={cn(
+        positionClass,
+        sizeClass,
+        variant === "inline" && "bg-transparent border-0 shadow-none",
+        className,
+      )}
+      aria-hidden
+    >
       <VoicePoweredOrb
         hue={hue}
         enableVoiceControl={voiceOn}
-        className="rounded-full overflow-hidden"
+        className={cn(
+          "overflow-hidden",
+          variant === "inline" ? "rounded-full bg-transparent" : "rounded-full",
+        )}
       />
     </div>
   );

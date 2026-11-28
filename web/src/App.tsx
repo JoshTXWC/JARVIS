@@ -1,6 +1,5 @@
 import { lazy, Suspense, useEffect, useRef } from "react";
 import BootSequence from "./components/Boot/BootSequence";
-import CommandBar from "./components/Chat/CommandBar";
 import DropZone from "./components/Chat/DropZone";
 import BarehandsOverlay from "./components/HUD/BarehandsOverlay";
 import CanvasTiles from "./components/HUD/CanvasTiles";
@@ -9,6 +8,7 @@ import CommandPalette from "./components/HUD/CommandPalette";
 import IconDock from "./components/HUD/IconDock";
 import Reticle from "./components/HUD/Reticle";
 import ConfirmModal from "./components/Tools/ConfirmModal";
+import FullChatStage from "./components/Chat/FullChatStage";
 import Orb from "./components/Orb/Orb";
 import { getHealth } from "./lib/api";
 import { useStore, nextId } from "./lib/store";
@@ -155,7 +155,9 @@ export default function App() {
     if (total > prev && hiddenRef.current) {
       (window as any).jarvis?.send?.("jarvis:show");
     }
-    if (total > prev) undockPanel("chat");
+    if (total > prev && useStore.getState().backgroundMode !== "chat") {
+      undockPanel("chat");
+    }
     lastMediaLenRef.current = total;
   }, [media, undockPanel]);
 
@@ -180,6 +182,8 @@ export default function App() {
 
   const pushChat = useStore((s) => s.pushChat);
   const booted = useStore((s) => s.booted);
+  const backgroundMode = useStore((s) => s.backgroundMode);
+  const chatStage = backgroundMode === "chat";
   const greetedRef = useRef(false);
   useEffect(() => {
     if (!booted || greetedRef.current) return;
@@ -195,17 +199,15 @@ export default function App() {
     }
     const t = setTimeout(() => {
       pushChat({ id: nextId(), role: "assistant", text, ts: Date.now() });
-      undockPanel("chat");
+      if (useStore.getState().backgroundMode !== "chat") undockPanel("chat");
     }, 600);
     return () => clearTimeout(t);
   }, [booted, pushChat, undockPanel]);
 
   return (
     <div className="relative w-screen h-screen overflow-hidden cc-root bg-background">
-      <Orb variant="fullscreen" />
-
-      {/* Composer under the orb only while the chat tile is docked */}
-      <OrbComposerFallback />
+      {!chatStage && <Orb variant="fullscreen" />}
+      {chatStage && <FullChatStage />}
 
       <IconDock />
       <CanvasTiles />
@@ -221,19 +223,6 @@ export default function App() {
       <BootSequence />
       <BarehandsOverlay />
       <GestureOverlay />
-    </div>
-  );
-}
-
-/** Under-orb PromptInput only when the chat tile is put away. */
-function OrbComposerFallback() {
-  const chatDocked = useStore((s) => s.dockedPanels.includes("chat"));
-  if (!chatDocked) return null;
-  return (
-    <div className="pointer-events-none absolute inset-x-0 bottom-[12%] z-20 flex justify-center px-4">
-      <div className="pointer-events-auto w-full max-w-xl rounded-2xl border border-white/12 bg-[rgba(22,24,28,0.4)] p-3 shadow-lg backdrop-blur-[32px]">
-        <CommandBar embedded />
-      </div>
     </div>
   );
 }

@@ -1,12 +1,12 @@
 /**
- * System Health tile — animated radial gauges for live resources.
+ * System Health tile — static radial gauges for live resources.
  */
 import { useEffect, useMemo } from "react";
 import { getStats } from "../../lib/api";
 import { useStore } from "../../lib/store";
 import { cn } from "@/lib/utils";
 
-type Tone = "ok" | "warn" | "crit" | "off";
+type Tone = "ok" | "warn" | "crit";
 
 type Gauge = {
   key: string;
@@ -16,12 +16,14 @@ type Gauge = {
   tone: Tone;
 };
 
-const TONE: Record<Tone, { stroke: string; glow: string; text: string }> = {
-  ok: { stroke: "#22d3ee", glow: "rgba(34,211,238,0.45)", text: "text-cyan-300" },
-  warn: { stroke: "#fbbf24", glow: "rgba(251,191,36,0.45)", text: "text-amber-300" },
-  crit: { stroke: "#fb7185", glow: "rgba(251,113,133,0.5)", text: "text-rose-300" },
-  off: { stroke: "rgba(148,163,184,0.35)", glow: "transparent", text: "text-slate-400" },
+const TONE: Record<Tone, { stroke: string; text: string }> = {
+  ok: { stroke: "#34d399", text: "text-emerald-300" },
+  warn: { stroke: "#fbbf24", text: "text-amber-300" },
+  crit: { stroke: "#f87171", text: "text-red-300" },
 };
+
+const RADIAL_SIZE = 112;
+const STROKE = 10;
 
 function sev(pct: number): Tone {
   if (pct >= 90) return "crit";
@@ -32,8 +34,6 @@ function sev(pct: number): Tone {
 export default function SystemHealth() {
   const stats = useStore((s) => s.stats);
   const setStats = useStore((s) => s.setStats);
-  const connected = useStore((s) => s.connected);
-  const health = useStore((s) => s.health);
 
   useEffect(() => {
     let live = true;
@@ -62,99 +62,46 @@ export default function SystemHealth() {
 
   const gauges = useMemo(() => {
     const rows: Gauge[] = [];
-    if (stats) {
+    if (!stats) return rows;
+    rows.push({
+      key: "cpu",
+      label: "CPU",
+      pct: stats.cpu,
+      sub: `${stats.cpu_count} cores`,
+      tone: sev(stats.cpu),
+    });
+    rows.push({
+      key: "ram",
+      label: "RAM",
+      pct: stats.ram.percent,
+      sub: `${stats.ram.used_gb.toFixed(1)} / ${stats.ram.total_gb.toFixed(0)} GB`,
+      tone: sev(stats.ram.percent),
+    });
+    rows.push({
+      key: "disk",
+      label: "DISK",
+      pct: stats.disk.percent,
+      sub: `${stats.disk.used_gb.toFixed(0)} / ${stats.disk.total_gb.toFixed(0)} GB`,
+      tone: sev(stats.disk.percent),
+    });
+    if (stats.gpu?.available) {
+      const load = stats.gpu.load_percent ?? 0;
       rows.push({
-        key: "cpu",
-        label: "CPU",
-        pct: stats.cpu,
-        sub: `${stats.cpu_count} cores`,
-        tone: sev(stats.cpu),
+        key: "gpu",
+        label: "GPU",
+        pct: load,
+        sub:
+          typeof stats.gpu.temp_c === "number"
+            ? `${stats.gpu.temp_c.toFixed(0)}°C · ${stats.gpu.name || "GPU"}`
+            : stats.gpu.name || "GPU",
+        tone: sev(load),
       });
-      rows.push({
-        key: "ram",
-        label: "RAM",
-        pct: stats.ram.percent,
-        sub: `${stats.ram.used_gb.toFixed(1)} / ${stats.ram.total_gb.toFixed(0)} GB`,
-        tone: sev(stats.ram.percent),
-      });
-      rows.push({
-        key: "disk",
-        label: "DISK",
-        pct: stats.disk.percent,
-        sub: `${stats.disk.used_gb.toFixed(0)} / ${stats.disk.total_gb.toFixed(0)} GB`,
-        tone: sev(stats.disk.percent),
-      });
-      if (stats.gpu?.available) {
-        const load = stats.gpu.load_percent ?? 0;
-        rows.push({
-          key: "gpu",
-          label: "GPU",
-          pct: load,
-          sub:
-            typeof stats.gpu.temp_c === "number"
-              ? `${stats.gpu.temp_c.toFixed(0)}°C · ${stats.gpu.name || "GPU"}`
-              : stats.gpu.name || "GPU",
-          tone: sev(load),
-        });
-      }
-      if (stats.battery) {
-        rows.push({
-          key: "batt",
-          label: "PWR",
-          pct: stats.battery.percent,
-          sub: stats.battery.plugged ? "AC power" : "Battery",
-          tone:
-            stats.battery.percent < 20
-              ? "crit"
-              : stats.battery.percent < 40
-                ? "warn"
-                : "ok",
-        });
-      }
     }
-    rows.push({
-      key: "link",
-      label: "LINK",
-      pct: connected ? 100 : 0,
-      sub: connected ? "Online" : "Offline",
-      tone: connected ? "ok" : "crit",
-    });
-    rows.push({
-      key: "ai",
-      label: "AI",
-      pct: health?.model?.configured ? 100 : health ? 70 : 0,
-      sub: health?.model?.model || (health ? "Ready" : "Offline"),
-      tone: health?.model?.configured ? "ok" : health ? "warn" : "off",
-    });
     return rows;
-  }, [stats, connected, health]);
+  }, [stats]);
 
   return (
     <div className="h-full min-h-0 flex flex-col px-3 py-3 gap-3">
-      <div className="flex items-center justify-between gap-2 shrink-0">
-        <div>
-          <p className="text-[11px] uppercase tracking-[0.22em] text-muted-foreground">Telemetry</p>
-          <p className="text-sm font-semibold text-foreground">
-            {stats?.os?.node?.split(".")[0] || "Local system"}
-          </p>
-        </div>
-        <span
-          className={cn(
-            "inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] font-medium",
-            connected
-              ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
-              : "border-rose-500/30 bg-rose-500/10 text-rose-300",
-          )}
-        >
-          <span
-            className={cn(
-              "size-1.5 rounded-full",
-              connected ? "bg-emerald-400 animate-pulse" : "bg-rose-400",
-            )}
-          />
-          {connected ? "Live" : "Down"}
-        </span>
-      </div>
 
       {!stats ? (
         <div className="flex-1 grid place-items-center text-xs text-muted-foreground">
@@ -164,7 +111,7 @@ export default function SystemHealth() {
         <div className="flex-1 min-h-0 overflow-y-auto">
           <div className="grid grid-cols-2 gap-3 place-items-center content-start py-1">
             {gauges.map((g) => (
-              <AnimatedRadial key={g.key} gauge={g} size={g.key === "cpu" || g.key === "ram" ? 118 : 100} />
+              <RadialGauge key={g.key} gauge={g} />
             ))}
           </div>
           {stats.net && (
@@ -181,59 +128,37 @@ export default function SystemHealth() {
   );
 }
 
-function AnimatedRadial({ gauge, size = 110 }: { gauge: Gauge; size?: number }) {
+function RadialGauge({ gauge }: { gauge: Gauge }) {
   const tone = TONE[gauge.tone];
   const pct = Math.max(0, Math.min(100, gauge.pct));
-  const r = size / 2 - 10;
+  const size = RADIAL_SIZE;
+  const r = (size - STROKE) / 2 - 2;
   const c = 2 * Math.PI * r;
   const dash = (pct / 100) * c;
 
   return (
     <div className="flex flex-col items-center gap-1.5 min-w-0" title={`${gauge.label}: ${pct.toFixed(0)}%`}>
       <div className="relative" style={{ width: size, height: size }}>
-        <svg width={size} height={size} className="-rotate-90">
-          <defs>
-            <linearGradient id={`g-${gauge.key}`} x1="0%" y1="0%" x2="100%" y2="100%">
-              <stop offset="0%" stopColor={tone.stroke} stopOpacity="1" />
-              <stop offset="100%" stopColor="#a78bfa" stopOpacity="0.85" />
-            </linearGradient>
-          </defs>
+        <svg width={size} height={size} className="-rotate-90" aria-hidden>
           <circle
             cx={size / 2}
             cy={size / 2}
             r={r}
             fill="none"
-            stroke="rgba(148,163,184,0.12)"
-            strokeWidth="6"
+            stroke="rgba(148,163,184,0.14)"
+            strokeWidth={STROKE}
           />
-          {/* Soft sweep halo */}
           <circle
             cx={size / 2}
             cy={size / 2}
             r={r}
             fill="none"
             stroke={tone.stroke}
-            strokeWidth="6"
-            strokeLinecap="round"
-            strokeDasharray={`${Math.max(10, c * 0.12)} ${c}`}
-            className="opacity-30"
-            style={{
-              transformOrigin: `${size / 2}px ${size / 2}px`,
-              animation: "spin_slow 8s linear infinite",
-            }}
-          />
-          <circle
-            cx={size / 2}
-            cy={size / 2}
-            r={r}
-            fill="none"
-            stroke={`url(#g-${gauge.key})`}
-            strokeWidth="6"
+            strokeWidth={STROKE}
             strokeLinecap="round"
             strokeDasharray={`${dash} ${c}`}
             style={{
-              filter: tone.glow !== "transparent" ? `drop-shadow(0 0 8px ${tone.glow})` : undefined,
-              transition: "stroke-dasharray 0.7s cubic-bezier(0.22,1,0.36,1)",
+              transition: "stroke-dasharray 0.6s ease, stroke 0.4s ease",
             }}
           />
         </svg>

@@ -3,7 +3,8 @@
  * Rounded input · + tools menu · mode pill · model picker popup · mic + send.
  */
 import * as React from "react";
-import { useRef, useState, useEffect, useCallback, useMemo } from "react";
+import { createPortal } from "react-dom";
+import { useRef, useState, useEffect, useLayoutEffect, useCallback, useMemo } from "react";
 import {
   ChevronDown,
   ImagePlus,
@@ -11,8 +12,6 @@ import {
   Monitor,
   Plus,
   Search,
-  Star,
-  Upload,
   Wrench,
   X,
   ArrowUp,
@@ -26,9 +25,13 @@ import {
   MemoryStick,
   LayoutGrid,
   Database,
-  CircleMinus,
   Download,
   Brain,
+  HardDrive,
+  Cpu,
+  Check,
+  Trash2,
+  Paperclip,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -65,6 +68,19 @@ export type PromptModelOption = {
   installed?: boolean;
   summary?: string;
   pull?: string | null;
+  vram_gb?: number;
+  ram_gb?: number;
+  size_gb?: number | null;
+  fit?: string;
+  fit_label?: string;
+  needs?: string;
+};
+
+export type ModelPullProgress = {
+  id: string;
+  percent: number | null;
+  detail?: string;
+  status?: string;
 };
 
 export type PromptToolOption = {
@@ -95,10 +111,6 @@ function loadStringList(key: string): string[] {
   } catch {
     return [];
   }
-}
-
-function saveStringList(key: string, values: string[]) {
-  localStorage.setItem(key, JSON.stringify(values));
 }
 
 /* ── Model helpers ─────────────────────────────────────────────────────── */
@@ -159,10 +171,277 @@ function modelLevel(m: PromptModelOption): string {
   if (m.skill === "reasoning" || m.skill === "coding") return "High";
   if (m.skill === "tools") return "High";
   if (m.skill === "balanced") return "Medium";
-  if (m.skill === "speed") return "Fast";
+  if (m.skill === "speed") return "Low";
   if (m.cloud) return "Cloud";
-  if (m.tier === "light") return "Fast";
+  if (m.tier === "light") return "Low";
+  if (m.tier === "heavy") return "Very High";
   return "Medium";
+}
+
+function reasoningCaption(m: PromptModelOption): string {
+  const lvl = modelLevel(m);
+  if (lvl === "Auto" || lvl === "Cloud" || lvl === "Fast") return `${lvl}`;
+  return `${lvl} Reasoning`;
+}
+
+function formatGb(n?: number | null): string | null {
+  if (n == null || !Number.isFinite(n) || n <= 0) return null;
+  return n >= 10 ? `${Math.round(n)} GB` : `${n.toFixed(1)} GB`;
+}
+
+function fitBadge(fit?: string, fallback?: string): { label: string; tone: "ok" | "tight" | "bad" | "muted" } {
+  if (fallback?.toLowerCase().includes("incompatible") || fallback?.toLowerCase().includes("won't")) {
+    return { label: fallback, tone: "bad" };
+  }
+  if (fallback?.toLowerCase().includes("tight")) return { label: fallback, tone: "tight" };
+  if (fallback?.toLowerCase().includes("fit")) return { label: fallback, tone: "ok" };
+  switch ((fit || "").toLowerCase()) {
+    case "fits":
+    case "cpu":
+      return { label: "Fits PC", tone: "ok" };
+    case "tight":
+      return { label: "Tight Fit", tone: "tight" };
+    case "heavy":
+    case "no":
+      return { label: "Incompatible", tone: "bad" };
+    default:
+      return { label: fallback || "Unknown", tone: "muted" };
+  }
+}
+
+type MetricTone = "good" | "mid" | "bad" | "neutral";
+
+function MetricPills({
+  label,
+  value,
+  max = 5,
+  tone = "neutral",
+}: {
+  label: string;
+  value: number;
+  max?: number;
+  tone?: MetricTone;
+}) {
+  const filled = Math.max(0, Math.min(max, Math.round(value)));
+  const fill =
+    tone === "good"
+      ? "bg-emerald-400"
+      : tone === "mid"
+        ? "bg-amber-400"
+        : tone === "bad"
+          ? "bg-red-400"
+          : "bg-sky-400";
+  return (
+    <div className="flex items-center gap-2.5">
+      <span className="w-[5.5rem] shrink-0 text-[12px] text-[#a1a1aa]">{label}</span>
+      <span className="flex flex-1 items-center gap-1">
+        {Array.from({ length: max }, (_, i) => (
+          <span
+            key={i}
+            className={cn(
+              "h-2.5 flex-1 rounded-full",
+              i < filled ? fill : "bg-white/[0.1]",
+            )}
+          />
+        ))}
+      </span>
+    </div>
+  );
+}
+
+function modelMetrics(m: PromptModelOption): {
+  intelligence: number;
+  intelligenceTone: MetricTone;
+  speed: number;
+  speedTone: MetricTone;
+  size: number;
+  sizeTone: MetricTone;
+} {
+  const lvl = modelLevel(m);
+  const intelligence =
+    lvl === "Very High" ? 5 : lvl === "High" ? 4 : lvl === "Medium" ? 3 : lvl === "Low" ? 2 : 3;
+  const sizeGb = m.size_gb ?? m.vram_gb ?? 0;
+  const speed =
+    m.skill === "speed" || m.tier === "light" || (sizeGb > 0 && sizeGb < 3)
+      ? 5
+      : sizeGb < 6
+        ? 4
+        : sizeGb < 12
+          ? 3
+          : 2;
+  const sizeScore =
+    sizeGb <= 0 ? 3 : sizeGb < 4 ? 5 : sizeGb < 8 ? 4 : sizeGb < 14 ? 3 : 2;
+  return {
+    intelligence,
+    intelligenceTone: intelligence >= 4 ? "good" : intelligence >= 3 ? "mid" : "neutral",
+    speed,
+    speedTone: speed >= 4 ? "good" : speed >= 3 ? "mid" : "bad",
+    size: sizeScore,
+    sizeTone: sizeScore >= 4 ? "good" : sizeScore >= 3 ? "mid" : "bad",
+  };
+}
+
+function ContextRing({
+  pct,
+  size = 28,
+  stroke = 2.5,
+  className,
+}: {
+  pct: number;
+  size?: number;
+  stroke?: number;
+  className?: string;
+}) {
+  const r = (size - stroke) / 2;
+  const c = 2 * Math.PI * r;
+  const filled = Math.max(0, Math.min(100, pct));
+  const dash = (filled / 100) * c;
+  const tone =
+    filled >= 90 ? "rgba(248,113,113,0.95)" : filled >= 70 ? "rgba(251,191,36,0.95)" : "rgba(255,255,255,0.92)";
+  return (
+    <svg width={size} height={size} className={cn("-rotate-90", className)} aria-hidden>
+      <circle
+        cx={size / 2}
+        cy={size / 2}
+        r={r}
+        fill="none"
+        stroke="rgba(255,255,255,0.12)"
+        strokeWidth={stroke}
+      />
+      <circle
+        cx={size / 2}
+        cy={size / 2}
+        r={r}
+        fill="none"
+        stroke={tone}
+        strokeWidth={stroke}
+        strokeLinecap="round"
+        strokeDasharray={`${dash} ${c - dash}`}
+      />
+    </svg>
+  );
+}
+
+function ContextRadial({
+  pct,
+  title,
+  onClick,
+}: {
+  pct: number;
+  title: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onMouseDown={(e) => e.preventDefault()}
+      onClick={onClick}
+      className="relative inline-flex size-8 items-center justify-center rounded-full"
+      aria-label={title}
+      title={title}
+    >
+      <ContextRing pct={pct} size={28} stroke={2.5} />
+    </button>
+  );
+}
+
+const PROVIDER_LABEL: Partial<Record<ModelFamily | "all", string>> = {
+  all: "All",
+  meta: "Meta",
+  qwen: "Qwen",
+  gemma: "Gemma",
+  gemini: "Google",
+  grok: "xAI",
+  phi: "Phi",
+  deepseek: "DeepSeek",
+  glm: "GLM",
+  kimi: "Kimi",
+  gpt: "OpenAI",
+  opus: "Anthropic",
+  huggingface: "HF",
+  ollama: "Ollama",
+  generic: "Other",
+};
+
+function providerName(family: ModelFamily | "all") {
+  return PROVIDER_LABEL[family] || family;
+}
+
+function ContextBreakdownRow({
+  label,
+  value,
+  total,
+  color,
+}: {
+  label: string;
+  value: number;
+  total: number;
+  color: string;
+}) {
+  const pct = total > 0 ? Math.max(0, Math.min(100, (value / total) * 100)) : 0;
+  return (
+    <div className="min-w-0">
+      <div className="mb-0.5 flex items-center justify-between gap-2 text-[10px]">
+        <span className="text-[#a1a1aa]">{label}</span>
+        <span className="tabular-nums text-[#71767b]">{value.toLocaleString()}</span>
+      </div>
+      <div className="h-1 overflow-hidden rounded-full bg-white/[0.08]">
+        <div className={cn("h-full rounded-full", color)} style={{ width: `${pct}%` }} />
+      </div>
+    </div>
+  );
+}
+
+/** Portal popups to body so the chat tile cannot clip them. */
+function useAnchoredPopup(open: boolean) {
+  const anchorRef = useRef<HTMLDivElement | null>(null);
+  const popupRef = useRef<HTMLDivElement | null>(null);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    const place = () => {
+      const anchor = anchorRef.current;
+      const popup = popupRef.current;
+      if (!anchor || !popup) return;
+      const a = anchor.getBoundingClientRect();
+      const pad = 10;
+      const gap = 10;
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      const pw = Math.max(popup.offsetWidth, 160);
+      const ph = Math.max(popup.offsetHeight, 40);
+      // Prefer sitting directly above the trigger.
+      let top = a.top - ph - gap;
+      if (top < pad) {
+        top = Math.min(a.bottom + gap, vh - ph - pad);
+      }
+      // Prefer left-align with trigger; flip if it would overflow the viewport.
+      let left = a.left;
+      if (left + pw > vw - pad) left = Math.max(pad, a.right - pw);
+      if (left < pad) left = pad;
+      if (top + ph > vh - pad) top = Math.max(pad, vh - ph - pad);
+      popup.style.position = "fixed";
+      popup.style.left = `${Math.round(left)}px`;
+      popup.style.top = `${Math.round(top)}px`;
+      popup.style.right = "auto";
+      popup.style.bottom = "auto";
+      popup.style.zIndex = "200";
+    };
+    place();
+    const raf = requestAnimationFrame(() => {
+      place();
+      requestAnimationFrame(place);
+    });
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
+  }, [open]);
+
+  return { anchorRef, popupRef };
 }
 
 const MODEL_ICON_URL: Partial<Record<ModelFamily, string>> = {
@@ -433,6 +712,9 @@ export interface PromptInputProps {
   loadedModels?: LoadedModelInfo[];
   onUnloadModel?: (id: string) => void;
   onPullModel?: (id: string) => void;
+  onCancelPull?: (id: string) => void;
+  onDeleteModel?: (id: string) => void;
+  pullProgress?: ModelPullProgress[];
   onRefreshLoaded?: () => void;
   reasoningEffort?: ReasoningLevel | string;
   reasoningLevels?: string[];
@@ -467,16 +749,24 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
       disabled = false,
       contextUsed = 0,
       contextLimit = 8192,
-      loadedModels = [],
-      onUnloadModel,
+      loadedModels: _loadedModels = [],
+      onUnloadModel: _onUnloadModel,
       onPullModel,
+      onCancelPull,
+      onDeleteModel,
+      pullProgress = [],
       onRefreshLoaded,
-      reasoningEffort = "none",
-      reasoningLevels = ["none", "low", "medium", "high"],
-      onReasoningEffortChange,
+      reasoningEffort: _reasoningEffort = "none",
+      reasoningLevels: _reasoningLevels = ["none", "low", "medium", "high"],
+      onReasoningEffortChange: _onReasoningEffortChange,
     },
     ref,
   ) => {
+    void _loadedModels;
+    void _onUnloadModel;
+    void _reasoningEffort;
+    void _reasoningLevels;
+    void _onReasoningEffortChange;
     const catalog = useMemo<PromptModelOption[]>(() => {
       if (modelOptions?.length) return modelOptions;
       return (models.length ? models : ["Model"]).map((label) => ({
@@ -493,11 +783,42 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
     const [modelOpen, setModelOpen] = useState(false);
     const [toolsOpen, setToolsOpen] = useState(false);
     const [contextOpen, setContextOpen] = useState(false);
-    const [reasoningOpen, setReasoningOpen] = useState(false);
     const [modelQuery, setModelQuery] = useState("");
-    const [toolQuery, setToolQuery] = useState("");
-    const [toolFilter, setToolFilter] = useState<"fav" | "all">("all");
-    const [toolFavs, setToolFavs] = useState<string[]>(() => loadStringList(TOOL_FAV_KEY));
+    const [previewModel, setPreviewModel] = useState<PromptModelOption | null>(null);
+    const [detailSide, setDetailSide] = useState<"left" | "right">("right");
+    const previewClearRef = useRef<number | null>(null);
+    const modelAnchor = useAnchoredPopup(modelOpen);
+
+    const showPreview = useCallback((m: PromptModelOption | null) => {
+      if (previewClearRef.current) {
+        window.clearTimeout(previewClearRef.current);
+        previewClearRef.current = null;
+      }
+      setPreviewModel(m);
+    }, []);
+
+    const scheduleClearPreview = useCallback(() => {
+      if (previewClearRef.current) window.clearTimeout(previewClearRef.current);
+      previewClearRef.current = window.setTimeout(() => setPreviewModel(null), 140);
+    }, []);
+
+    useEffect(() => {
+      if (!modelOpen) setPreviewModel(null);
+    }, [modelOpen]);
+
+    useLayoutEffect(() => {
+      if (!modelOpen || !previewModel) return;
+      const list = modelAnchor.popupRef.current;
+      if (!list) return;
+      const rect = list.getBoundingClientRect();
+      const detailW = 288;
+      const gap = 8;
+      const pad = 10;
+      const spaceRight = window.innerWidth - rect.right - gap - pad;
+      const spaceLeft = rect.left - gap - pad;
+      setDetailSide(spaceRight >= detailW || spaceRight >= spaceLeft ? "right" : "left");
+    }, [modelOpen, previewModel?.id, modelAnchor.popupRef]);
+    const [toolFavs] = useState<string[]>(() => loadStringList(TOOL_FAV_KEY));
     const [autoOn, setAutoOn] = useState(!!autoModel);
     const [attachments, setAttachments] = useState<Attachment[]>([]);
     const [activeAttachment, setActiveAttachment] = useState<{
@@ -541,21 +862,22 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
     }, [value]);
 
     useEffect(() => {
-      if (!modelOpen && !toolsOpen && !contextOpen && !reasoningOpen) return;
+      if (!modelOpen && !toolsOpen && !contextOpen) return;
       const onDown = (e: MouseEvent) => {
-        if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
-          setModelOpen(false);
-          setToolsOpen(false);
-          setContextOpen(false);
-          setReasoningOpen(false);
-        }
+        const t = e.target as Node | null;
+        if (!t) return;
+        const el = t instanceof Element ? t : t.parentElement;
+        if (rootRef.current?.contains(t)) return;
+        if (el?.closest?.("[data-jarvis-popup]")) return;
+        setModelOpen(false);
+        setToolsOpen(false);
+        setContextOpen(false);
       };
       const onKey = (e: KeyboardEvent) => {
         if (e.key === "Escape") {
           setModelOpen(false);
           setToolsOpen(false);
           setContextOpen(false);
-          setReasoningOpen(false);
         }
       };
       document.addEventListener("mousedown", onDown);
@@ -564,7 +886,7 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
         document.removeEventListener("mousedown", onDown);
         document.removeEventListener("keydown", onKey);
       };
-    }, [modelOpen, toolsOpen, contextOpen, reasoningOpen]);
+    }, [modelOpen, toolsOpen, contextOpen]);
 
     useEffect(() => {
       if (modelOpen) onRefreshLoaded?.();
@@ -588,61 +910,53 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
     const selectedMeta = catalog.find((m) => m.label === selectedLabel) || catalog[0];
     const selectedLevel = selectedMeta ? modelLevel(selectedMeta) : "";
 
+    const localCatalog = useMemo(
+      () => catalog.filter((m) => m.id !== "auto" && !m.cloud),
+      [catalog],
+    );
+
     const filteredModels = useMemo(() => {
       const needle = modelQuery.trim().toLowerCase();
-      // Downloaded locals/cloud + catalog entries that can still be pulled.
-      let list = catalog.filter((m) => {
-        if (m.id === "auto") return false;
-        if (m.installed) return true;
-        if (m.cloud) return true;
-        if (m.pull) return true;
-        return false;
-      });
+      let list = localCatalog;
       if (needle) {
         list = list.filter(
           (m) =>
             m.label.toLowerCase().includes(needle) ||
             (m.skill_label || "").toLowerCase().includes(needle) ||
             (m.summary || "").toLowerCase().includes(needle) ||
-            m.id.toLowerCase().includes(needle),
+            m.id.toLowerCase().includes(needle) ||
+            providerName(modelFamily(m.label)).toLowerCase().includes(needle),
         );
       }
       return [...list].sort((a, b) => {
-        const ai = a.installed || a.cloud ? 0 : 1;
-        const bi = b.installed || b.cloud ? 0 : 1;
+        const ai = a.installed ? 0 : 1;
+        const bi = b.installed ? 0 : 1;
         if (ai !== bi) return ai - bi;
-        return a.label.localeCompare(b.label);
+        const ar = a.recommended ? 0 : 1;
+        const br = b.recommended ? 0 : 1;
+        if (ar !== br) return ar - br;
+        return (a.vram_gb || 0) - (b.vram_gb || 0) || a.label.localeCompare(b.label);
       });
-    }, [catalog, modelQuery]);
+    }, [localCatalog, modelQuery]);
+
+    const progressFor = (id: string, label: string) =>
+      pullProgress.find(
+        (p) =>
+          p.id === id ||
+          p.id === label ||
+          id.endsWith(p.id) ||
+          p.id.endsWith(id) ||
+          label.toLowerCase().includes(p.id.toLowerCase()),
+      );
 
     const filteredTools = useMemo(() => {
-      const needle = toolQuery.trim().toLowerCase();
-      let list = tools;
-      if (toolFilter === "fav") list = list.filter((t) => toolFavs.includes(t.name));
-      if (needle) {
-        list = list.filter(
-          (t) =>
-            t.name.toLowerCase().includes(needle) ||
-            (t.description || "").toLowerCase().includes(needle) ||
-            (t.plugin || "").toLowerCase().includes(needle),
-        );
-      }
-      return [...list].sort((a, b) => {
+      return [...tools].sort((a, b) => {
         const af = toolFavs.includes(a.name) ? 0 : 1;
         const bf = toolFavs.includes(b.name) ? 0 : 1;
         if (af !== bf) return af - bf;
         return a.name.localeCompare(b.name);
       });
-    }, [tools, toolQuery, toolFilter, toolFavs]);
-
-    const toggleToolFav = (name: string, e: React.MouseEvent) => {
-      e.stopPropagation();
-      setToolFavs((prev) => {
-        const next = prev.includes(name) ? prev.filter((x) => x !== name) : [...prev, name];
-        saveStringList(TOOL_FAV_KEY, next);
-        return next;
-      });
-    };
+    }, [tools, toolFavs]);
 
     const pickModel = (m: PromptModelOption) => {
       setSelectedLabel(m.label);
@@ -657,6 +971,7 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
       if (enabled) {
         const auto = catalog.find((m) => m.id === "auto");
         if (auto) setSelectedLabel(auto.label);
+        setPreviewModel(null);
       } else if (selectedMeta?.id === "auto") {
         const fallback =
           catalog.find((m) => m.id !== "auto" && m.recommended && m.installed !== false) ||
@@ -717,7 +1032,6 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
       setModelOpen(false);
       setToolsOpen(false);
       setContextOpen(false);
-      setReasoningOpen(false);
     };
 
     const onMicClick = (e: React.MouseEvent) => {
@@ -766,14 +1080,12 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
       setToolsOpen((v) => !v);
       setModelOpen(false);
       setContextOpen(false);
-      setReasoningOpen(false);
     };
 
     const openModels = () => {
       setModelOpen((v) => !v);
       setToolsOpen(false);
       setContextOpen(false);
-      setReasoningOpen(false);
       setModelQuery("");
     };
 
@@ -781,26 +1093,14 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
       setContextOpen((v) => !v);
       setModelOpen(false);
       setToolsOpen(false);
-      setReasoningOpen(false);
     };
 
-    const openReasoning = () => {
-      setReasoningOpen((v) => !v);
-      setModelOpen(false);
-      setToolsOpen(false);
-      setContextOpen(false);
-    };
-
-    const favToolCount = toolFavs.filter((n) => tools.some((t) => t.name === n)).length;
-    const reasoningLabel =
-      !reasoningEffort || reasoningEffort === "none"
-        ? "Reasoning"
-        : `Reason ${String(reasoningEffort)}`;
     const ctxLimit = Math.max(1, contextLimit || 8192);
     const ctxUsed = Math.max(0, contextUsed || 0);
     const ctxPct = Math.min(100, Math.round((ctxUsed / ctxLimit) * 100));
-    const ctxTone =
-      ctxPct >= 90 ? "text-red-400" : ctxPct >= 70 ? "text-amber-300" : "text-[#71767b]";
+    const ctxFree = Math.max(0, ctxLimit - ctxUsed);
+    const ctxSystem = Math.min(ctxUsed, Math.round(ctxLimit * 0.08));
+    const ctxChat = Math.max(0, ctxUsed - ctxSystem);
 
     return (
       <>
@@ -810,7 +1110,7 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
             else if (ref) ref.current = node;
             (rootRef as React.MutableRefObject<HTMLDivElement | null>).current = node;
           }}
-          className={cn("relative w-full max-w-[720px]", className)}
+          className={cn("relative w-full min-w-0", className)}
         >
           <input
             ref={fileInputRef}
@@ -863,32 +1163,14 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
               if (e.target === e.currentTarget) textareaRef.current?.focus();
             }}
           >
-            <textarea
-              ref={textareaRef}
-              value={value}
-              onChange={(e) => handleValueChange(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  if (busy) return;
-                  handleSubmit();
-                }
-              }}
-              placeholder={placeholder}
-              aria-label="Prompt"
-              disabled={recording || disabled}
-              rows={1}
-              className="w-full resize-none bg-transparent px-5 pt-4 pb-2 text-[15px] leading-6 text-[#e7e9ea] outline-none ring-0 focus:outline-none focus:ring-0 focus-visible:outline-none focus-visible:ring-0 placeholder:text-[#71767b] disabled:opacity-60"
-            />
-
-            <div className="flex items-center gap-1.5 px-3 pb-3 pt-1">
-              <div className="relative">
+            <div className="flex items-start gap-1 px-2 pt-3">
+              <div className="relative shrink-0 pt-0.5">
                 <button
                   type="button"
                   onMouseDown={(e) => e.preventDefault()}
                   onClick={openTools}
                   className={cn(
-                    "flex size-8 items-center justify-center rounded-full border border-white/[0.08] bg-white/[0.06] text-[#e7e9ea]/80 transition hover:bg-white/[0.1] hover:text-white",
+                    "flex size-8 items-center justify-center rounded-full text-[#e7e9ea]/80 transition hover:bg-white/[0.08] hover:text-white",
                     toolsOpen && "bg-white/[0.12] text-white",
                   )}
                   aria-label="Attach or use a tool"
@@ -897,87 +1179,45 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
                 </button>
 
                 {toolsOpen && (
-                  <div className="absolute bottom-[calc(100%+10px)] left-0 z-50 w-[300px] overflow-hidden rounded-2xl border border-white/[0.08] bg-[#242428] shadow-[0_18px_50px_-12px_rgba(0,0,0,0.75)]">
-                    <div className="border-b border-white/[0.06] p-2.5">
-                      <div className="flex items-center gap-2 rounded-xl bg-white/[0.04] px-2.5 py-2 text-[#71767b]">
-                        <Search className="size-3.5 shrink-0" />
-                        <input
-                          value={toolQuery}
-                          onChange={(e) => setToolQuery(e.target.value)}
-                          placeholder="Search tools"
-                          className="w-full bg-transparent text-sm text-[#e7e9ea] outline-none placeholder:text-[#71767b]"
-                          autoFocus
-                        />
-                      </div>
-                    </div>
+                  <div className="absolute bottom-[calc(100%+8px)] left-0 z-50 w-[min(340px,78vw)] overflow-hidden rounded-2xl border border-white/[0.08] bg-[#2f2f2f] py-1.5 shadow-[0_18px_50px_-12px_rgba(0,0,0,0.75)]">
+                    <button
+                      type="button"
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => {
+                        anyFileInputRef.current?.click();
+                        setToolsOpen(false);
+                      }}
+                      className="flex w-full items-center gap-3 px-3 py-2.5 text-left hover:bg-white/[0.08]"
+                    >
+                      <Paperclip className="size-4 shrink-0 text-[#e7e9ea]/85" />
+                      <span className="min-w-0 flex-1 truncate text-[13px]">
+                        <span className="font-medium text-white">Add photos &amp; files</span>{" "}
+                        <span className="text-[#9b9b9b]">Upload from computer</span>
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => {
+                        fileInputRef.current?.click();
+                        setToolsOpen(false);
+                      }}
+                      className="flex w-full items-center gap-3 px-3 py-2.5 text-left hover:bg-white/[0.08]"
+                    >
+                      <ImagePlus className="size-4 shrink-0 text-sky-300" />
+                      <span className="min-w-0 flex-1 truncate text-[13px]">
+                        <span className="font-medium text-white">Add photos</span>{" "}
+                        <span className="text-[#9b9b9b]">Images for vision</span>
+                      </span>
+                    </button>
 
-                    <div className="flex items-center justify-between px-3 pt-2.5 pb-1.5">
-                      <div className="inline-flex rounded-full bg-white/[0.04] p-0.5 text-[11px]">
-                        <button
-                          type="button"
-                          onClick={() => setToolFilter("fav")}
-                          className={cn(
-                            "inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[#71767b]",
-                            toolFilter === "fav" && "bg-white/[0.1] text-white",
-                          )}
-                        >
-                          <Star className="size-3" />
-                          fav {favToolCount}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setToolFilter("all")}
-                          className={cn(
-                            "rounded-full px-2.5 py-1 text-[#71767b]",
-                            toolFilter === "all" && "bg-white/[0.1] text-white",
-                          )}
-                        >
-                          all {tools.length}
-                        </button>
-                      </div>
-                    </div>
+                    {filteredTools.length > 0 && (
+                      <div className="my-1 border-t border-white/[0.08]" />
+                    )}
 
-                    <div className="max-h-72 overflow-y-auto px-1.5 pb-2">
-                      <button
-                        type="button"
-                        onMouseDown={(e) => e.preventDefault()}
-                        onClick={() => fileInputRef.current?.click()}
-                        className="flex w-full items-center gap-3 rounded-xl px-2.5 py-2 text-left text-sm text-[#e7e9ea] hover:bg-white/[0.06]"
-                      >
-                        <span className="flex size-8 items-center justify-center rounded-full bg-sky-500/15 text-sky-300">
-                          <ImagePlus className="size-4" />
-                        </span>
-                        <span className="min-w-0 flex-1">
-                          <span className="block font-medium">Upload images</span>
-                          <span className="block truncate text-xs text-[#71767b]">
-                            Attach photos for vision
-                          </span>
-                        </span>
-                      </button>
-                      <button
-                        type="button"
-                        onMouseDown={(e) => e.preventDefault()}
-                        onClick={() => anyFileInputRef.current?.click()}
-                        className="flex w-full items-center gap-3 rounded-xl px-2.5 py-2 text-left text-sm text-[#e7e9ea] hover:bg-white/[0.06]"
-                      >
-                        <span className="flex size-8 items-center justify-center rounded-full bg-white/10 text-white/70">
-                          <Upload className="size-4" />
-                        </span>
-                        <span className="min-w-0 flex-1">
-                          <span className="block font-medium">Upload files</span>
-                          <span className="block truncate text-xs text-[#71767b]">
-                            PDFs, docs, and more
-                          </span>
-                        </span>
-                      </button>
-
-                      {filteredTools.length > 0 && (
-                        <div className="my-1.5 mx-2 border-t border-white/[0.06]" />
-                      )}
-
+                    <div className="max-h-64 overflow-y-auto">
                       {filteredTools.map((tool) => {
                         const Icon = toolIcon(tool.name);
-                        const fav = toolFavs.includes(tool.name);
                         return (
                           <button
                             key={tool.name}
@@ -987,147 +1227,52 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
                               onToolSelect?.(tool);
                               setToolsOpen(false);
                             }}
-                            className="group flex w-full items-center gap-3 rounded-xl px-2.5 py-2 text-left text-sm text-[#e7e9ea] hover:bg-white/[0.06]"
+                            className="flex w-full items-center gap-3 px-3 py-2.5 text-left hover:bg-white/[0.08]"
                           >
-                            <span className="flex size-8 items-center justify-center rounded-full bg-white/[0.06] text-white/75">
-                              <Icon className="size-3.5" />
-                            </span>
-                            <span className="min-w-0 flex-1">
-                              <span className="block truncate font-medium">
-                                {prettyToolName(tool.name)}
-                              </span>
-                              <span className="block truncate text-xs text-[#71767b]">
+                            <Icon className="size-4 shrink-0 text-[#e7e9ea]/85" />
+                            <span className="min-w-0 flex-1 truncate text-[13px]">
+                              <span className="font-medium text-white">{prettyToolName(tool.name)}</span>{" "}
+                              <span className="text-[#9b9b9b]">
                                 {tool.description || tool.plugin || tool.permission || "Tool"}
                               </span>
                             </span>
-                            <span
-                              role="button"
-                              tabIndex={-1}
-                              onClick={(e) => toggleToolFav(tool.name, e)}
-                              className="opacity-70 hover:opacity-100"
-                              aria-label={fav ? "Unfavorite" : "Favorite"}
-                            >
-                              <Star
-                                className={cn(
-                                  "size-3.5",
-                                  fav ? "fill-amber-400 text-amber-400" : "text-[#71767b]",
-                                )}
-                              />
-                            </span>
                           </button>
                         );
                       })}
-
                       {tools.length === 0 && (
-                        <div className="px-3 py-4 text-center text-xs text-[#71767b]">
-                          Tools will appear once JARVIS connects.
+                        <div className="px-3 py-3 text-[12px] text-[#9b9b9b]">
+                          Tools appear once JARVIS connects.
                         </div>
                       )}
                       {tools.length > 0 && filteredTools.length === 0 && (
-                        <div className="px-3 py-4 text-center text-xs text-[#71767b]">
-                          No matching tools
-                        </div>
+                        <div className="px-3 py-3 text-[12px] text-[#9b9b9b]">No matching tools</div>
                       )}
                     </div>
                   </div>
                 )}
               </div>
 
-              {onReasoningEffortChange && (
-                <div className="relative">
-                  <button
-                    type="button"
-                    onMouseDown={(e) => e.preventDefault()}
-                    onClick={openReasoning}
-                    className={cn(
-                      "inline-flex h-8 items-center gap-1.5 rounded-full border border-white/[0.08] bg-white/[0.04] px-2.5 text-[13px] font-medium text-[#e7e9ea]/90 transition hover:bg-white/[0.08]",
-                      reasoningOpen && "bg-white/[0.1]",
-                    )}
-                    aria-label={`Reasoning level. Current: ${reasoningEffort || "none"}`}
-                  >
-                    <Brain className="size-3.5 opacity-80" />
-                    <span className="capitalize">{reasoningLabel}</span>
-                    <ChevronDown className="size-3.5 opacity-60" />
-                  </button>
-                  {reasoningOpen && (
-                    <div className="absolute bottom-[calc(100%+10px)] left-0 z-50 min-w-[160px] overflow-hidden rounded-2xl border border-white/[0.08] bg-[#242428] p-1 shadow-[0_18px_50px_-12px_rgba(0,0,0,0.75)]">
-                      {(reasoningLevels.length
-                        ? reasoningLevels
-                        : ["none", "low", "medium", "high"]
-                      ).map((lvl) => {
-                        const active = (reasoningEffort || "none") === lvl;
-                        return (
-                          <button
-                            key={lvl}
-                            type="button"
-                            onMouseDown={(e) => e.preventDefault()}
-                            onClick={() => {
-                              onReasoningEffortChange(lvl);
-                              setReasoningOpen(false);
-                            }}
-                            className={cn(
-                              "flex w-full items-center rounded-xl px-3 py-2 text-left text-sm capitalize text-[#e7e9ea]/85 hover:bg-white/[0.06]",
-                              active && "bg-white/[0.08] text-white",
-                            )}
-                          >
-                            {lvl}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              )}
+              <textarea
+                ref={textareaRef}
+                value={value}
+                onChange={(e) => handleValueChange(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    if (busy) return;
+                    handleSubmit();
+                  }
+                }}
+                placeholder={placeholder}
+                aria-label="Prompt"
+                disabled={recording || disabled}
+                rows={1}
+                className="min-w-0 flex-1 resize-none bg-transparent px-1 pt-1.5 pb-2 text-[15px] leading-6 text-[#e7e9ea] outline-none ring-0 focus:outline-none focus:ring-0 focus-visible:outline-none focus-visible:ring-0 placeholder:text-[#71767b] disabled:opacity-60"
+              />
+            </div>
 
-              <div className="relative">
-                <button
-                  type="button"
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={openContext}
-                  className={cn(
-                    "inline-flex h-8 items-center gap-1.5 rounded-full border border-white/[0.08] bg-transparent px-2 text-[12px] transition hover:bg-white/[0.06]",
-                    contextOpen && "bg-white/[0.08]",
-                    ctxTone,
-                  )}
-                  aria-label={`Context usage ${ctxUsed} of ${ctxLimit} tokens`}
-                  title="Context usage"
-                >
-                  <Database className="size-3.5 shrink-0 opacity-80" />
-                  <span className="tabular-nums font-medium">{ctxPct}%</span>
-                </button>
-                {contextOpen && (
-                  <div className="absolute bottom-[calc(100%+10px)] left-0 z-50 w-[260px] overflow-hidden rounded-2xl border border-white/[0.08] bg-[#242428] p-3 shadow-[0_18px_50px_-12px_rgba(0,0,0,0.75)]">
-                    <div className="text-sm font-medium text-[#e7e9ea]">Context</div>
-                    <p className="mt-1 text-[12px] text-[#71767b]">
-                      Tokens in the active conversation window versus the model limit.
-                    </p>
-                    <div className="mt-3 h-2 overflow-hidden rounded-full bg-white/[0.08]">
-                      <div
-                        className={cn(
-                          "h-full rounded-full transition-all",
-                          ctxPct >= 90
-                            ? "bg-red-400"
-                            : ctxPct >= 70
-                              ? "bg-amber-400"
-                              : "bg-[#1d9bf0]",
-                        )}
-                        style={{ width: `${ctxPct}%` }}
-                      />
-                    </div>
-                    <div className="mt-2 flex items-center justify-between text-[12px] tabular-nums text-[#e7e9ea]/85">
-                      <span>{ctxUsed.toLocaleString()} used</span>
-                      <span className="text-[#71767b]">{ctxLimit.toLocaleString()} max</span>
-                    </div>
-                    {loadedModels[0]?.context_length ? (
-                      <div className="mt-2 text-[11px] text-[#71767b]">
-                        Loaded ctx · {loadedModels[0].context_length.toLocaleString()}
-                      </div>
-                    ) : null}
-                  </div>
-                )}
-              </div>
-
-              <div className="relative min-w-0">
+            <div className="flex items-center gap-1.5 px-3 pb-3 pt-1">
+              <div className="relative min-w-0" ref={modelAnchor.anchorRef}>
                 <button
                   type="button"
                   onMouseDown={(e) => e.preventDefault()}
@@ -1148,139 +1293,342 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
                   <ChevronDown className="size-3.5 shrink-0 opacity-55" />
                 </button>
 
-                {modelOpen && (
-                  <div className="absolute bottom-[calc(100%+10px)] left-0 z-50 w-[320px] overflow-hidden rounded-2xl border border-white/[0.08] bg-[#242428] shadow-[0_18px_50px_-12px_rgba(0,0,0,0.75)]">
-                    <div className="space-y-2 border-b border-white/[0.06] p-2.5">
-                      <div className="flex items-center gap-2 rounded-xl bg-white/[0.04] px-2.5 py-2 text-[#71767b]">
-                        <Search className="size-3.5 shrink-0" />
-                        <input
-                          value={modelQuery}
-                          onChange={(e) => setModelQuery(e.target.value)}
-                          placeholder="Search models"
-                          className="w-full bg-transparent text-sm text-[#e7e9ea] outline-none placeholder:text-[#71767b]"
-                          autoFocus
-                        />
-                      </div>
-                      <div className="flex items-center justify-between px-1">
-                        <span className="text-sm font-medium text-[#e7e9ea]">Auto</span>
-                        <button
-                          type="button"
-                          role="switch"
-                          aria-checked={autoOn}
-                          onMouseDown={(e) => e.preventDefault()}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setAuto(!autoOn);
-                          }}
-                          className={cn(
-                            "relative h-[22px] w-[40px] shrink-0 rounded-full transition-colors",
-                            autoOn ? "bg-[#1d9bf0]" : "bg-white/15",
-                          )}
-                        >
-                          <span
-                            className={cn(
-                              "pointer-events-none absolute top-[2px] left-[2px] size-[18px] rounded-full bg-white shadow transition-transform duration-200",
-                              autoOn && "translate-x-[18px]",
-                            )}
+                {modelOpen &&
+                  typeof document !== "undefined" &&
+                  createPortal(
+                    <div
+                      ref={modelAnchor.popupRef as React.RefObject<HTMLDivElement>}
+                      data-jarvis-popup
+                      className="relative w-[min(17.5rem,calc(100vw-1.5rem))] text-sm text-[#e7e9ea]"
+                    >
+                      <div className="flex max-h-[min(360px,62vh)] flex-col overflow-hidden rounded-2xl border border-white/[0.1] bg-[#1c1c20] shadow-[0_18px_50px_-12px_rgba(0,0,0,0.75)]">
+                        <div className="flex shrink-0 items-center gap-2 border-b border-white/[0.06] px-2.5 py-2">
+                          <Search className="size-3.5 shrink-0 text-[#71767b]" />
+                          <input
+                            value={modelQuery}
+                            onChange={(e) => setModelQuery(e.target.value)}
+                            placeholder="Search models…"
+                            className="h-5 w-full min-w-0 bg-transparent text-[13px] text-[#e7e9ea] outline-none placeholder:text-[#71767b]"
+                            autoFocus
                           />
-                        </button>
-                      </div>
-                    </div>
+                        </div>
 
-                    <div className="max-h-80 overflow-y-auto px-1.5 py-2">
-                      {filteredModels.map((m) => {
-                        const level = modelLevel(m);
-                        const active = !autoOn && m.label === selectedLabel;
-                        const downloaded = !!m.installed || !!m.cloud;
-                        const resident = loadedModels.some(
-                          (lm) => lm.id === m.id || lm.name === m.label || lm.name === m.id,
-                        );
-                        const canPull = !m.installed && !m.cloud && !!m.pull && !!onPullModel;
-                        return (
-                          <div
-                            key={m.id}
+                        <div className="flex items-center justify-between gap-2 border-b border-white/[0.06] px-2.5 py-1.5">
+                          <span className="text-[12px] font-medium">Auto</span>
+                          <button
+                            type="button"
+                            role="switch"
+                            aria-checked={autoOn}
+                            onMouseDown={(e) => e.preventDefault()}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setAuto(!autoOn);
+                            }}
                             className={cn(
-                              "group flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left",
-                              active && "bg-white/[0.06]",
-                              downloaded && "hover:bg-white/[0.06]",
+                              "relative h-[18px] w-[32px] shrink-0 rounded-full transition-colors",
+                              autoOn ? "bg-[#1d9bf0]" : "bg-white/15",
                             )}
                           >
-                            <button
-                              type="button"
-                              disabled={canPull}
-                              onMouseDown={(e) => e.preventDefault()}
-                              onClick={() => {
-                                if (canPull) return;
-                                pickModel(m);
-                              }}
-                              className="flex min-w-0 flex-1 items-center gap-2.5 text-left disabled:cursor-default"
-                            >
-                              <ModelIcon model={m.label} className={cn(!downloaded && "opacity-60")} />
-                              <span className="min-w-0 flex-1 truncate text-sm">
-                                <span
-                                  className={cn(
-                                    "font-semibold",
-                                    downloaded ? "text-[#e7e9ea]" : "text-[#e7e9ea]/75",
-                                  )}
+                            <span
+                              className={cn(
+                                "pointer-events-none absolute top-[2px] left-[2px] size-[14px] rounded-full bg-white shadow transition-transform duration-200",
+                                autoOn && "translate-x-[14px]",
+                              )}
+                            />
+                          </button>
+                        </div>
+
+                        {!autoOn && (
+                        <div className="flex max-h-[min(14rem,44dvh)] flex-col gap-0.5 overflow-y-auto p-1 [scrollbar-width:thin]">
+                          {filteredModels.map((m) => {
+                            const active = m.label === selectedLabel;
+                            const downloaded = !!m.installed;
+                            const canPull = !m.installed && !!m.pull && !!onPullModel;
+                            const job = progressFor(m.id, m.label);
+                            const pulling =
+                              !!job &&
+                              (job.status === "pulling" ||
+                                job.status === "queued" ||
+                                (job.percent != null && job.percent < 100));
+                            const fam = modelFamily(m.label);
+                            const previewing = previewModel?.id === m.id;
+                            return (
+                              <div
+                                key={m.id}
+                                onMouseEnter={() => showPreview(m)}
+                                onMouseLeave={scheduleClearPreview}
+                                className={cn(
+                                  "flex items-center gap-1.5 rounded-xl px-2 py-1.5 transition",
+                                  (active || previewing) && "bg-white/[0.08]",
+                                  !active && !previewing && "hover:bg-white/[0.05]",
+                                )}
+                              >
+                                <button
+                                  type="button"
+                                  disabled={(canPull && !downloaded) || pulling}
+                                  onMouseDown={(e) => e.preventDefault()}
+                                  onClick={() => {
+                                    if ((canPull && !downloaded) || pulling) return;
+                                    pickModel(m);
+                                  }}
+                                  className="flex min-w-0 flex-1 items-center gap-2 text-left disabled:cursor-default"
                                 >
-                                  {m.label}
-                                </span>{" "}
-                                <span className="text-[#71767b]">{level}</span>
-                                {resident && (
-                                  <span className="ml-1 text-[10px] uppercase tracking-wide text-emerald-400/90">
-                                    loaded
+                                  <span className="grid size-6 shrink-0 place-items-center">
+                                    <ModelIcon model={m.label} className="size-3.5" />
                                   </span>
-                                )}
-                                {m.cloud && (
-                                  <span className="ml-1 text-[10px] uppercase tracking-wide text-sky-400/90">
-                                    cloud
+                                  <span className="min-w-0 flex-1">
+                                    <span className="flex items-center gap-1">
+                                      <span className="truncate text-[12.5px] font-semibold tracking-tight">
+                                        {m.label}
+                                      </span>
+                                      {active && <Check className="size-3 shrink-0 opacity-80" />}
+                                    </span>
+                                    <span className="mt-0.5 block truncate text-[10px] text-[#71767b]">
+                                      {providerName(fam)}
+                                    </span>
                                   </span>
+                                </button>
+
+                                {!downloaded && (
+                                  <button
+                                    type="button"
+                                    title="Install"
+                                    aria-label={`Install ${m.label}`}
+                                    disabled={!canPull && !pulling}
+                                    onMouseDown={(e) => e.preventDefault()}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      onPullModel?.(m.id);
+                                    }}
+                                    className={cn(
+                                      "inline-flex h-6 shrink-0 items-center gap-1 rounded-md px-1.5 text-[10px] font-medium",
+                                      pulling
+                                        ? "bg-emerald-500/25 text-emerald-200"
+                                        : "bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30",
+                                      "disabled:opacity-40",
+                                    )}
+                                  >
+                                    <Download className={cn("size-3", pulling && "animate-pulse")} />
+                                    {pulling ? "…" : "Install"}
+                                  </button>
                                 )}
-                                {canPull && (
-                                  <span className="ml-1 text-[10px] uppercase tracking-wide text-amber-400/90">
-                                    download
-                                  </span>
-                                )}
-                              </span>
-                            </button>
-                            {canPull && (
-                              <button
-                                type="button"
-                                title="Download model"
-                                aria-label={`Download ${m.label}`}
-                                onMouseDown={(e) => e.preventDefault()}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  onPullModel?.(m.id);
-                                }}
-                                className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-[#71767b] hover:bg-white/[0.08] hover:text-emerald-300"
-                              >
-                                <Download className="size-3.5" />
-                              </button>
-                            )}
-                            {downloaded && !m.cloud && resident && onUnloadModel && (
-                              <button
-                                type="button"
-                                title="Unload from memory"
-                                aria-label={`Unload ${m.label}`}
-                                onMouseDown={(e) => e.preventDefault()}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  onUnloadModel(m.id);
-                                }}
-                                className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-[#71767b] hover:bg-white/[0.08] hover:text-red-300"
-                              >
-                                <CircleMinus className="size-3.5" />
-                              </button>
-                            )}
-                          </div>
-                        );
-                      })}
-                      {filteredModels.length === 0 && (
-                        <div className="px-3 py-4 text-center text-xs text-[#71767b]">
-                          No matching models
+                              </div>
+                            );
+                          })}
+                          {filteredModels.length === 0 && (
+                            <div className="px-3 py-5 text-center text-[11px] text-[#71767b]">
+                              {modelQuery.trim()
+                                ? `No models match "${modelQuery.trim()}"`
+                                : "No matching models"}
+                            </div>
+                          )}
+                        </div>
+                        )}
+                        {autoOn && (
+                          <p className="px-3 py-3 text-[12px] text-[#71767b]">
+                            Auto picks the best local model. Turn Auto off to choose manually.
+                          </p>
+                        )}
+                      </div>
+
+                      {!autoOn && previewModel && (
+                        <div
+                          onMouseEnter={() => showPreview(previewModel)}
+                          onMouseLeave={scheduleClearPreview}
+                          className={cn(
+                            "absolute top-0 z-10 flex w-[min(17.5rem,calc(100vw-1.5rem))] flex-col overflow-hidden rounded-2xl border border-white/[0.1] bg-[#1c1c20] shadow-[0_18px_50px_-12px_rgba(0,0,0,0.75)]",
+                            detailSide === "right" ? "left-[calc(100%+8px)]" : "right-[calc(100%+8px)]",
+                          )}
+                        >
+                          {(() => {
+                            const m = previewModel;
+                            const fam = modelFamily(m.label);
+                            const metrics = modelMetrics(m);
+                            const badge = fitBadge(m.fit, m.fit_label);
+                            const size = formatGb(m.size_gb ?? m.vram_gb ?? null);
+                            const ram = formatGb(m.ram_gb);
+                            const downloaded = !!m.installed;
+                            const canPull = !m.installed && !!m.pull && !!onPullModel;
+                            const job = progressFor(m.id, m.label);
+                            const pulling =
+                              !!job &&
+                              (job.status === "pulling" ||
+                                job.status === "queued" ||
+                                (job.percent != null && job.percent < 100));
+                            return (
+                              <>
+                                <div className="border-b border-white/[0.06] px-3 py-2.5">
+                                  <div className="flex items-start gap-2">
+                                    <span className="mt-0.5 grid size-7 shrink-0 place-items-center rounded-lg bg-white/[0.06]">
+                                      <ModelIcon model={m.label} className="size-4" />
+                                    </span>
+                                    <div className="min-w-0 flex-1">
+                                      <div className="truncate text-[13px] font-semibold">{m.label}</div>
+                                      <div className="mt-0.5 flex items-center gap-1.5 text-[10px] text-[#71767b]">
+                                        <span>{providerName(fam)}</span>
+                                        {downloaded && (
+                                          <span className="rounded-md bg-emerald-500/20 px-1.5 py-0.5 text-emerald-300">
+                                            Installed
+                                          </span>
+                                        )}
+                                      </div>
+                                    </div>
+                                  </div>
+                                  <p className="mt-2 text-[11px] leading-relaxed text-[#a1a1aa]">
+                                    {m.summary ||
+                                      m.skill_label ||
+                                      `${reasoningCaption(m)} · ${badge.label}${size ? ` · ${size}` : ""}`}
+                                  </p>
+                                </div>
+
+                                <div className="space-y-2 px-3 py-2.5">
+                                  <MetricPills
+                                    label="Reasoning"
+                                    value={metrics.intelligence}
+                                    tone={metrics.intelligenceTone}
+                                  />
+                                  <MetricPills
+                                    label="Speed"
+                                    value={metrics.speed}
+                                    tone={metrics.speedTone}
+                                  />
+                                  <MetricPills
+                                    label="Footprint"
+                                    value={metrics.size}
+                                    tone={metrics.sizeTone}
+                                  />
+                                </div>
+
+                                <div className="space-y-1.5 border-t border-white/[0.06] px-3 py-2.5 text-[11px]">
+                                  <div className="flex items-center justify-between gap-2 text-[#a1a1aa]">
+                                    <span className="inline-flex items-center gap-1.5">
+                                      <HardDrive className="size-3" /> Disk
+                                    </span>
+                                    <span className="font-medium text-[#e7e9ea]">{size || "—"}</span>
+                                  </div>
+                                  <div className="flex items-center justify-between gap-2 text-[#a1a1aa]">
+                                    <span className="inline-flex items-center gap-1.5">
+                                      <Cpu className="size-3" /> RAM
+                                    </span>
+                                    <span className="font-medium text-[#e7e9ea]">
+                                      {ram ? `≈ ${ram}` : "—"}
+                                    </span>
+                                  </div>
+                                  <div className="flex items-center justify-between gap-2 text-[#a1a1aa]">
+                                    <span className="inline-flex items-center gap-1.5">
+                                      <Brain className="size-3" /> Level
+                                    </span>
+                                    <span className="font-medium text-[#e7e9ea]">
+                                      {reasoningCaption(m)}
+                                    </span>
+                                  </div>
+                                  <div className="flex items-center justify-between gap-2 text-[#a1a1aa]">
+                                    <span>Compatibility</span>
+                                    <span
+                                      className={cn(
+                                        "rounded-md px-1.5 py-0.5 text-[10px] font-medium",
+                                        badge.tone === "ok" && "bg-emerald-500/20 text-emerald-300",
+                                        badge.tone === "tight" && "bg-amber-500/20 text-amber-300",
+                                        badge.tone === "bad" && "bg-red-500/20 text-red-300",
+                                        badge.tone === "muted" && "bg-white/10 text-[#71767b]",
+                                      )}
+                                    >
+                                      {badge.label}
+                                    </span>
+                                  </div>
+                                  {m.needs && (
+                                    <p className="text-[10px] leading-relaxed text-[#71767b]">{m.needs}</p>
+                                  )}
+                                </div>
+
+                                <div className="mt-auto flex gap-2 border-t border-white/[0.06] px-3 py-2.5">
+                                  {downloaded ? (
+                                    <button
+                                      type="button"
+                                      disabled={!onDeleteModel}
+                                      onMouseDown={(e) => e.preventDefault()}
+                                      onClick={() => onDeleteModel?.(m.id)}
+                                      className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-xl bg-red-500/20 px-3 py-1.5 text-[11px] font-medium text-red-300 hover:bg-red-500/30 disabled:opacity-40"
+                                    >
+                                      <Trash2 className="size-3.5" />
+                                      Delete
+                                    </button>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      disabled={!canPull && !pulling}
+                                      onMouseDown={(e) => e.preventDefault()}
+                                      onClick={() => onPullModel?.(m.id)}
+                                      className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-xl bg-emerald-500/20 px-3 py-1.5 text-[11px] font-medium text-emerald-300 hover:bg-emerald-500/30 disabled:opacity-40"
+                                    >
+                                      <Download className={cn("size-3.5", pulling && "animate-pulse")} />
+                                      {pulling ? "Installing…" : "Install"}
+                                    </button>
+                                  )}
+                                  {downloaded && (
+                                    <button
+                                      type="button"
+                                      onMouseDown={(e) => e.preventDefault()}
+                                      onClick={() => pickModel(m)}
+                                      className="inline-flex flex-1 items-center justify-center rounded-xl bg-white/[0.08] px-3 py-1.5 text-[11px] font-medium text-white hover:bg-white/[0.12]"
+                                    >
+                                      Select
+                                    </button>
+                                  )}
+                                </div>
+                              </>
+                            );
+                          })()}
                         </div>
                       )}
+                    </div>,
+                    document.body,
+                  )}
+              </div>
+
+              <div className="relative">
+                <ContextRadial
+                  pct={ctxPct}
+                  title={`Context ${ctxPct}% · ${ctxUsed.toLocaleString()} / ${ctxLimit.toLocaleString()}`}
+                  onClick={openContext}
+                />
+                {contextOpen && (
+                  <div className="absolute bottom-[calc(100%+10px)] left-0 z-50 w-[260px] rounded-xl border border-white/[0.08] bg-[#1c1c20] p-3.5 shadow-[0_18px_50px_-12px_rgba(0,0,0,0.75)]">
+                    <div className="flex items-center gap-3">
+                      <div className="relative shrink-0">
+                        <ContextRing pct={ctxPct} size={72} stroke={7} />
+                        <div className="absolute inset-0 grid place-items-center">
+                          <span className="text-sm font-semibold tabular-nums text-[#e7e9ea]">
+                            {ctxPct}%
+                          </span>
+                        </div>
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="text-sm font-medium text-[#e7e9ea]">Context</div>
+                        <p className="mt-0.5 text-[11px] text-[#71767b]">
+                          {ctxUsed.toLocaleString()} / {ctxLimit.toLocaleString()} tokens
+                        </p>
+                        <div className="mt-2.5 space-y-1.5">
+                          <ContextBreakdownRow
+                            label="Conversation"
+                            value={ctxChat}
+                            total={ctxLimit}
+                            color="bg-sky-400"
+                          />
+                          <ContextBreakdownRow
+                            label="System"
+                            value={ctxSystem}
+                            total={ctxLimit}
+                            color="bg-violet-400"
+                          />
+                          <ContextBreakdownRow
+                            label="Free"
+                            value={ctxFree}
+                            total={ctxLimit}
+                            color="bg-white/25"
+                          />
+                        </div>
+                      </div>
                     </div>
                   </div>
                 )}
@@ -1354,6 +1702,7 @@ export const PromptInput = React.forwardRef<HTMLDivElement, PromptInputProps>(
             onClose={() => setActiveAttachment(null)}
           />
         )}
+
       </>
     );
   },

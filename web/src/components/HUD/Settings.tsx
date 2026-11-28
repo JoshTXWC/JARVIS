@@ -25,6 +25,10 @@ export default function Settings() {
   const setReader = useStore((s) => s.setReader);
   const prevSessionAvailable = useStore((s) => s.prevSessionAvailable);
   const restoreLastSession = useStore((s) => s.restoreLastSession);
+  const backgroundMode = useStore((s) => s.backgroundMode);
+  const setBackgroundMode = useStore((s) => s.setBackgroundMode);
+  const dockPanel = useStore((s) => s.dockPanel);
+  const undockPanel = useStore((s) => s.undockPanel);
 
   const gestureEnabled = useStore((s) => s.gestureEnabled);
   const setGestureEnabled = useStore((s) => s.setGestureEnabled);
@@ -113,6 +117,32 @@ export default function Settings() {
       <p className="text-[15px] text-[var(--text-secondary)]">
         {health?.model?.model || "Local"} · {health?.model?.provider || "core"}
       </p>
+
+      <Section title="Display">
+        <div className="grid grid-cols-2 gap-2">
+          <Preset
+            active={backgroundMode === "orb" || backgroundMode === "neural"}
+            onClick={() => {
+              setBackgroundMode("orb");
+              undockPanel("chat");
+            }}
+          >
+            Orb stage
+          </Preset>
+          <Preset
+            active={backgroundMode === "chat"}
+            onClick={() => {
+              setBackgroundMode("chat");
+              dockPanel("chat");
+            }}
+          >
+            Full chat
+          </Preset>
+        </div>
+        <p className="mt-2 text-[12px] text-[var(--text-secondary)]">
+          Full chat fills the background. The orb still animates while JARVIS responds.
+        </p>
+      </Section>
 
       <Section title="Voice">
         <div className="grid grid-cols-2 gap-2">

@@ -131,9 +131,22 @@ async def ollama_library(request: Request):
         if "coder" in mid:
             tags.append("code")
         items.append({
-            "id": mid, "label": e.get("label") or mid, "size_gb": e.get("vram_gb"),
-            "tags": tags, "summary": e.get("summary") or "", "recommended": bool(e.get("recommended")),
+            "id": mid,
+            "label": e.get("label") or mid,
+            "size_gb": e.get("vram_gb"),
+            "vram_gb": e.get("vram_gb"),
+            "ram_gb": e.get("ram_gb"),
+            "tags": tags,
+            "summary": e.get("summary") or "",
+            "recommended": bool(e.get("recommended")),
             "fit": fit_for_vram(float(e.get("vram_gb") or 0), vram),
+            "fit_label": {
+                "fits": "Fits this PC",
+                "cpu": "Fits (CPU)",
+                "tight": "Tight fit",
+                "heavy": "May not fit",
+            }.get(fit_for_vram(float(e.get("vram_gb") or 0), vram), "Fit unknown"),
+            "needs": e.get("needs") or "",
             "installed": _norm(mid) in installed,
         })
     for mid, label, size, tags, summary in LIBRARY_EXTRA:

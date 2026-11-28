@@ -21,6 +21,7 @@ import {
   Markdown,
   type TraceNode,
 } from "@/components/ui/ai-thinking-and-tool-calls";
+import Orb from "../Orb/Orb";
 import { cn } from "@/lib/utils";
 
 export default function ChatPanel({ embedded = false }: { embedded?: boolean }) {
@@ -72,7 +73,7 @@ export default function ChatPanel({ embedded = false }: { embedded?: boolean }) 
         ) : (
           <div
             ref={contentRef}
-            className="mx-auto w-full max-w-2xl px-4 pt-4 pb-6 flex flex-col gap-6 selection:bg-primary/20 antialiased [font-synthesis:none]"
+            className="mx-auto w-full max-w-3xl min-w-0 px-4 pt-6 pb-8 flex flex-col gap-6 selection:bg-primary/20 antialiased [font-synthesis:none] sm:px-8"
           >
             {turns.map((turn) => {
               if (turn.kind === "user") {
@@ -138,27 +139,25 @@ function buildTurns(spoken: ChatEntry[], tools: ToolCall[], orbState: string): T
     }
     nodes.push(...related.map(toolToNode));
 
-    if (nodes.length > 0) {
+    // Real tool/reasoning traces only — streaming response uses the inline Orb.
+    if (nodes.length > 0 && !entry.streaming) {
       turns.push({
         kind: "tools",
         key: `tools-${entry.id}`,
         nodes,
-        live: related.some((t) => t.status === "running" || t.status === "proposed") || !!entry.streaming,
+        live: related.some((t) => t.status === "running" || t.status === "proposed"),
       });
-    } else if (entry.streaming && (orbState === "thinking" || orbState === "executing")) {
-      turns.push({
-        kind: "tools",
-        key: `thinking-${entry.id}`,
-        nodes: [
-          {
-            type: "reasoning",
-            sentences: ["Working through the request…"],
-            durationSeconds: 0,
-            status: "running",
-          },
-        ],
-        live: true,
-      });
+    } else if (nodes.length > 0 && entry.streaming) {
+      // Keep live tool cards while streaming, but never synthetic "thinking" copy.
+      const toolNodes = nodes.filter((n) => n.type !== "reasoning");
+      if (toolNodes.length > 0) {
+        turns.push({
+          kind: "tools",
+          key: `tools-${entry.id}`,
+          nodes: toolNodes,
+          live: true,
+        });
+      }
     }
 
     turns.push({ kind: "assistant", entry });
@@ -182,22 +181,20 @@ function buildTurns(spoken: ChatEntry[], tools: ToolCall[], orbState: string): T
       });
     }
   } else if (
-    (orbState === "thinking" || orbState === "executing") &&
+    (orbState === "thinking" || orbState === "executing" || orbState === "speaking") &&
     spoken.length > 0 &&
     spoken[spoken.length - 1]?.role === "user"
   ) {
+    // Pending reply: Orb sits where the assistant message will land.
     turns.push({
-      kind: "tools",
-      key: "thinking-live",
-      nodes: [
-        {
-          type: "reasoning",
-          sentences: ["Thinking through the next steps…"],
-          durationSeconds: 0,
-          status: "running",
-        },
-      ],
-      live: true,
+      kind: "assistant",
+      entry: {
+        id: "__pending_stream__",
+        role: "assistant",
+        text: "",
+        streaming: true,
+        ts: Date.now(),
+      },
     });
   }
 
@@ -534,20 +531,20 @@ function UserBubble({ entry }: { entry: ChatEntry }) {
 
 function AssistantBubble({ entry }: { entry: ChatEntry }) {
   const { text, streaming } = entry;
+  if (streaming) {
+    return (
+      <div className="group flex min-w-0 items-start" aria-busy="true" aria-label="Responding">
+        <Orb variant="inline" className="!h-20 !w-20" enableVoiceControl />
+      </div>
+    );
+  }
   return (
     <div className="group flex flex-col gap-1 min-w-0">
       <div className="font-sans text-[14px] leading-[22px] text-foreground/90 select-text text-pretty">
         <Markdown text={text || ""} />
-        {streaming && (
-          <span className="inline-block w-1.5 h-4 bg-foreground/70 ml-0.5 align-middle animate-pulse rounded-sm" />
-        )}
       </div>
-      {!streaming && (
-        <>
-          <MessageStats entry={entry} />
-          <MessageActions entry={entry} align="left" />
-        </>
-      )}
+      <MessageStats entry={entry} />
+      <MessageActions entry={entry} align="left" />
     </div>
   );
 }

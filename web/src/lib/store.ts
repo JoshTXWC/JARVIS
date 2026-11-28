@@ -343,9 +343,12 @@ interface StoreState {
   setDesktopGesture: (v: string) => void;
   desktopCalibrating: boolean;
   setDesktopCalibrating: (v: boolean) => void;
-  // World background: classic centered orb vs interactive neural cloud.
-  backgroundMode: "orb" | "neural";
-  setBackgroundMode: (m: "orb" | "neural") => void;
+  // World background: centered orb, neural cloud, or full-bleed chat stage.
+  backgroundMode: "orb" | "neural" | "chat";
+  setBackgroundMode: (m: "orb" | "neural" | "chat") => void;
+  /** Live voice / STT snippet shown in the full-chat voice chip. */
+  liveTranscript: string;
+  setLiveTranscript: (v: string) => void;
   // Command Center view routing (replaces floating-panel canvas).
   activeView: string;
   setActiveView: (v: string) => void;
@@ -649,6 +652,8 @@ export const useStore = create<StoreState>()(persist((set) => ({
   setDesktopCalibrating: (v) => set({ desktopCalibrating: v }),
   backgroundMode: "orb",
   setBackgroundMode: (m) => set({ backgroundMode: m }),
+  liveTranscript: "",
+  setLiveTranscript: (v) => set({ liveTranscript: v }),
 }), {
   // Persist only durable, user-meaningful slices. Ephemeral runtime state
   // (orb, audio levels, mic flags, transient overlays, attachments) lives
@@ -667,7 +672,11 @@ export const useStore = create<StoreState>()(persist((set) => ({
     if (version < 4) {
       p.gestureEnabled = false;
     }
-    if (p.backgroundMode !== "orb" && p.backgroundMode !== "neural") {
+    if (
+      p.backgroundMode !== "orb" &&
+      p.backgroundMode !== "neural" &&
+      p.backgroundMode !== "chat"
+    ) {
       p.backgroundMode = "orb";
     }
     return p as typeof persisted;
@@ -717,7 +726,11 @@ export const useStore = create<StoreState>()(persist((set) => ({
         state.dockedPanels = [...state.dockedPanels, id];
       }
     }
-    if (state.backgroundMode !== "orb" && state.backgroundMode !== "neural") {
+    if (
+      state.backgroundMode !== "orb" &&
+      state.backgroundMode !== "neural" &&
+      state.backgroundMode !== "chat"
+    ) {
       state.backgroundMode = "orb";
     }
     // Hands is always an explicit opt-in — never restore camera/tracking on boot.

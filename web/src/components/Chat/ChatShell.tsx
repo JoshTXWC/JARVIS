@@ -67,7 +67,7 @@ export default function ChatShell() {
           <ChatPanel embedded />
         </div>
         <div className="shrink-0 border-t border-[var(--border)] bg-[var(--background)]">
-          <div className="mx-auto w-full max-w-3xl px-4 py-3">
+          <div className="mx-auto w-full min-w-0 px-4 py-3">
             <CommandBar embedded />
           </div>
         </div>

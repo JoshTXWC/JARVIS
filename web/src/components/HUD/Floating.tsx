@@ -22,6 +22,9 @@ interface Props {
   defaultBox: Box;
   minW?: number;
   minH?: number;
+  /** Soft cap; still limited by the canvas. Omit for no extra max. */
+  maxW?: number;
+  maxH?: number;
   children: React.ReactNode;
   locked?: boolean;
   z?: number;
@@ -151,6 +154,8 @@ export default function Floating({
   defaultBox,
   minW = 240,
   minH = 120,
+  maxW,
+  maxH,
   children,
   locked = false,
   z = 20,
@@ -161,6 +166,22 @@ export default function Floating({
 }: Props) {
   const lockedW = fixedWidth === true ? defaultBox.w : typeof fixedWidth === "number" ? fixedWidth : null;
   const resizeEnabled = !locked && !autoHeight && !noResize && lockedW == null;
+
+  const clampPanel = useCallback(
+    (box: Box, vw?: number, vh?: number) => {
+      const next = clampBox(box, vw, vh);
+      if (typeof maxW === "number" && Number.isFinite(maxW)) {
+        next.w = Math.min(next.w, Math.max(minW, maxW));
+      }
+      if (typeof maxH === "number" && Number.isFinite(maxH)) {
+        next.h = Math.min(next.h, Math.max(minH, maxH));
+      }
+      next.w = Math.max(minW, next.w);
+      next.h = Math.max(minH, next.h);
+      return next;
+    },
+    [maxW, maxH, minW, minH],
+  );
 
   const [saved, setSaved] = useState<SavedBox>(() => {
     const box = loadBox(id, defaultBox);
@@ -246,9 +267,9 @@ export default function Floating({
 
   const display = useMemo(() => {
     const base = transient ?? computeDisplay(saved, vp.w, vp.h);
-    if (lockedW == null) return base;
-    return { ...base, w: lockedW };
-  }, [saved, vp, transient, lockedW]);
+    const sized = lockedW == null ? base : { ...base, w: lockedW };
+    return clampPanel(sized, vp.w, vp.h);
+  }, [saved, vp, transient, lockedW, clampPanel]);
 
   useEffect(() => {
     updateSlot(id, display);
@@ -326,7 +347,7 @@ export default function Floating({
         const cy = base.y + base.h / 2;
         const nw = Math.max(minW, baseW * factor);
         const nh = Math.max(minH, baseH * factor);
-        return clampBox({ x: cx - nw / 2, y: cy - nh / 2, w: nw, h: nh });
+        return clampPanel({ x: cx - nw / 2, y: cy - nh / 2, w: nw, h: nh });
       });
     };
     const onRelease = (e: Event) => {
@@ -346,7 +367,7 @@ export default function Floating({
       setDockHot(false);
       setTransient((t) => {
         if (t) {
-          const next = clampBox(t);
+          const next = clampPanel(t);
           setSaved({ ...next, vw: window.innerWidth, vh: window.innerHeight });
         }
         return null;
@@ -370,6 +391,7 @@ export default function Floating({
     lockedW,
     minW,
     minH,
+    clampPanel,
     canDock,
     setDockHot,
     startDockAnimation,
@@ -617,13 +639,19 @@ export default function Floating({
     if (edge === "se" || edge === "e") {
       next.w = Math.max(minW, resizeRef.current.orig.w + dx);
       next.w = Math.min(next.w, bounds.right - next.x);
+      if (typeof maxW === "number" && Number.isFinite(maxW)) {
+        next.w = Math.min(next.w, maxW);
+      }
     }
     if (edge === "se" || edge === "s") {
       next.h = Math.max(minH, resizeRef.current.orig.h + dy);
       next.h = Math.min(next.h, bounds.bottom - next.y);
+      if (typeof maxH === "number" && Number.isFinite(maxH)) {
+        next.h = Math.min(next.h, maxH);
+      }
     }
-    setTransient(clampBox(next));
-  }, [minW, minH]);
+    setTransient(clampPanel(next));
+  }, [minW, minH, maxW, maxH, clampPanel]);
 
   const commitResize = useCallback(() => {
     if (!resizeRef.current) return;
@@ -631,12 +659,12 @@ export default function Floating({
     setDraggingFlag(false);
     setTransient((t) => {
       if (t) {
-        const next = clampBox(t);
+        const next = clampPanel(t);
         setSaved({ ...next, vw: window.innerWidth, vh: window.innerHeight });
       }
       return null;
     });
-  }, []);
+  }, [clampPanel]);
 
   const onResizeStart = useCallback((e: React.PointerEvent, edge: "se" | "e" | "s" = "se") => {
     if (!resizeEnabled || docking || carrying) return;

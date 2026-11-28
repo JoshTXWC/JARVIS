@@ -548,10 +548,13 @@ export class JarvisMic {
     this._loudRunStart = 0;
     // Drop any in-flight capture (would otherwise pick up JARVIS itself).
     if (this.isRecording) this._stopRecording();
+    const st = useStore.getState();
+    const last = [...st.chat].reverse().find((c) => c.role === "assistant" && c.text?.trim());
+    if (last?.text) st.setLiveTranscript(last.text);
     if (this._wantListening) {
-      useStore.getState().setMicMode("speaking");
-      useStore.getState().setMicStatus(
-        useStore.getState().bargeIn
+      st.setMicMode("speaking");
+      st.setMicStatus(
+        st.bargeIn
           ? "JARVIS speaking · talk to interrupt"
           : "JARVIS speaking · mic muted",
       );
@@ -568,6 +571,7 @@ export class JarvisMic {
     if (this._wantListening) {
       useStore.getState().setMicMode("armed");
       useStore.getState().setMicStatus(`armed · ${Math.round(FOLLOWUP_REPLY_MS/1000)}s to reply`);
+      useStore.getState().setLiveTranscript("");
     }
   }
 
@@ -585,6 +589,7 @@ export class JarvisMic {
     useStore.getState().setMicMode("armed");
     useStore.getState().setOrb("listening");
     useStore.getState().setMicStatus("interrupted · listening…");
+    useStore.getState().setLiveTranscript("");
     this._startRecording();
   }
 
@@ -865,6 +870,7 @@ export class JarvisMic {
           this._awakeUntil = now + FOLLOWUP_WAKE_MS;
           useStore.getState().setMicMode("armed");
           useStore.getState().setMicStatus("awake · awaiting command");
+          useStore.getState().setLiveTranscript(text);
           this._onWake?.(text);
           return;
         }
@@ -873,6 +879,7 @@ export class JarvisMic {
         // refining the request without re-saying the wake word.
         this._awakeUntil = now + FOLLOWUP_WAKE_MS;
         useStore.getState().setMicMode("armed");
+        useStore.getState().setLiveTranscript(cleaned);
         this._onWake?.(text);
         this._queueSubmit(cleaned);
       }
@@ -900,6 +907,7 @@ export class JarvisMic {
     this._coalesceBuf.push(text);
     if (this._coalesceTimer) clearTimeout(this._coalesceTimer);
     useStore.getState().setMicStatus("…");
+    useStore.getState().setLiveTranscript(this._coalesceBuf.join(" "));
     this._coalesceTimer = setTimeout(() => this._flushCoalesce(), STT_COALESCE_MS);
   }
 
@@ -907,6 +915,7 @@ export class JarvisMic {
     if (this._coalesceTimer) { clearTimeout(this._coalesceTimer); this._coalesceTimer = null; }
     const joined = this._coalesceBuf.join(" ").replace(/\s+/g, " ").trim();
     this._coalesceBuf = [];
+    if (joined) useStore.getState().setLiveTranscript(joined);
     if (joined && this._onTranscript) this._onTranscript(joined, true);
   }
 
